@@ -330,7 +330,7 @@
     }
 
     @Test
-    fun `item stack serialization calls without provider evidence do not inject fallbacks`() {
+    fun `item stack serialization without a provider source becomes an explicit provider boundary`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
         srcDir.resolve("UnprovenItemStackNbtSurface.java").writeText("""
@@ -356,9 +356,10 @@
         val migrated = srcDir.resolve("UnprovenItemStackNbtSurface.java").readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(migrated.contains("ItemStack restored = ItemStack.of(tag.getCompound(\"Stack\"));"), migrated)
-        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items);"), migrated)
-        assertTrue(migrated.contains("tag.put(\"Stack\", stack.save(new CompoundTag()));"), migrated)
+        assertTrue(migrated.contains("migrate(CompoundTag tag, HolderLookup.Provider registries, ItemStack stack)"), migrated)
+        assertTrue(migrated.contains("ItemStack restored = ItemStack.parseOptional(registries, tag.getCompound(\"Stack\"));"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, registries);"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Stack\", stack.saveOptional(registries));"), migrated)
         assertFalse(migrated.contains("RegistryAccess.EMPTY"), migrated)
         assertFalse(migrated.contains("player.registryAccess()"), migrated)
     }

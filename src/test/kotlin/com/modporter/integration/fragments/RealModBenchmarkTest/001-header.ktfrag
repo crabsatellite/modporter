@@ -12,6 +12,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -55,6 +56,7 @@ import kotlin.test.assertTrue
  *   MODPORTER_BENCHMARK_CASES=a,b         run only the listed manifest ids
  *   MODPORTER_BENCHMARK_PROGRESS_GRACE_SECONDS=75
  *                                           after a progress marker, fail fast if final markers never arrive
+ *   MODPORTER_BENCHMARK_MAX_HEAP=4g         benchmark test-worker heap for large source graphs
  *   MODPORTER_BENCHMARK_CLIENT_WORLD=path use a prepared vanilla save for runClientWorld
  *   MODPORTER_BENCHMARK_MINECRAFT_SERVER_JAR=path
  *                                           override the vanilla server jar used to generate the smoke save
@@ -65,6 +67,7 @@ class RealModBenchmarkTest {
     private val readmeSnapshotEnd = "<!-- MODPORTER:BENCHMARK-SNAPSHOT:END -->"
 
     @Test
+    @Timeout(value = 12, unit = TimeUnit.HOURS)
     @EnabledIfEnvironmentVariable(named = "MODPORTER_REAL_MOD_TEST", matches = "true")
     fun `real mod benchmark manifest`() {
         val repoRoot = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize()

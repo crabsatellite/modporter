@@ -74,27 +74,33 @@ class ProviderAwareNbtContractMigrationTest {
         val migratedOwner = owner.readText()
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        val serializeProvider = Regex(
+            """public CompoundTag serializeNBT\((?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(migratedInventory)?.groupValues?.get(1)
+        assertTrue(serializeProvider != null, migratedInventory)
+        assertTrue(migratedInventory.contains("backing.serializeNBT($serializeProvider)"), migratedInventory)
+        val deserializeProvider = Regex(
+            """public void deserializeNBT\((?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+), CompoundTag tag\)"""
+        ).find(migratedInventory)?.groupValues?.get(1)
+        assertTrue(deserializeProvider != null, migratedInventory)
         assertTrue(
-            migratedInventory.contains(
-                "public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"
-            ),
+            migratedInventory.contains("backing.deserializeNBT($deserializeProvider, tag)"),
             migratedInventory
         )
-        assertTrue(migratedInventory.contains("backing.serializeNBT(provider)"), migratedInventory)
+        val writeProvider = Regex(
+            """write\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+), boolean clientPacket\)"""
+        ).find(migratedOwner)?.groupValues?.get(1)
+        val readProvider = Regex(
+            """read\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+), boolean clientPacket\)"""
+        ).find(migratedOwner)?.groupValues?.get(1)
+        assertTrue(writeProvider != null, migratedOwner)
+        assertTrue(readProvider != null, migratedOwner)
+        assertTrue(migratedOwner.contains("inventory.serializeNBT($writeProvider)"), migratedOwner)
         assertTrue(
-            migratedInventory.contains(
-                "public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag)"
-            ),
-            migratedInventory
-        )
-        assertTrue(migratedInventory.contains("backing.deserializeNBT(provider, tag)"), migratedInventory)
-        assertTrue(migratedOwner.contains("inventory.serializeNBT(modporterRegistries)"), migratedOwner)
-        assertTrue(
-            migratedOwner.contains(
-                "inventory.deserializeNBT(modporterRegistries, tag.getCompound(\"Inventory\"))"
-            ),
+            migratedOwner.contains("inventory.deserializeNBT($readProvider, tag.getCompound(\"Inventory\"))"),
             migratedOwner
         )
+        assertFalse(migratedOwner.contains("getLevel().registryAccess()"), migratedOwner)
         assertFalse(migratedOwner.contains("inventory.deserializeNBT(tag.getCompound(\"Inventory\"),"), migratedOwner)
     }
 
@@ -241,6 +247,309 @@ class ProviderAwareNbtContractMigrationTest {
         assertTrue(migrated.contains("public ListTag serializeNBT()"), migrated)
         assertTrue(migrated.contains("public void deserializeNBT(ListTag tag)"), migrated)
         assertFalse(migrated.contains("HolderLookup.Provider"), migrated)
+    }
+
+    @Test
+    fun `same arity overloads migrate only the exact provider demanded declaration and typed call`() {
+        val payload = javaFile(
+            "Payload.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Payload {
+                ItemStack stack;
+
+                public static Payload read(CompoundTag tag) {
+                    Payload payload = new Payload();
+                    payload.stack = ItemStack.of(tag.getCompound("Stack"));
+                    return payload;
+                }
+
+                public static Payload read(FriendlyByteBuf buffer) {
+                    return new Payload();
+                }
+
+                public void preserveTags(CompoundTag primary, CompoundTag optional) {
+                }
+            }
+            """.trimIndent()
+        )
+        val caller = javaFile(
+            "PayloadReader.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.Level;
+
+            public class PayloadReader {
+                Payload read(Level level, CompoundTag tag) {
+                    return Payload.read(tag);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migratedPayload = payload.readText()
+        val migratedCaller = caller.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(
+            Regex("""read\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+\)""")
+                .containsMatchIn(migratedPayload),
+            migratedPayload
+        )
+        assertTrue(migratedPayload.contains("read(FriendlyByteBuf buffer)"), migratedPayload)
+        assertFalse(migratedPayload.contains("read(FriendlyByteBuf buffer,"), migratedPayload)
+        assertTrue(
+            migratedPayload.contains("preserveTags(CompoundTag primary, CompoundTag optional)"),
+            migratedPayload
+        )
+        assertTrue(
+            Regex("""Payload\.read\(tag, level\.registryAccess\(\)\)""").containsMatchIn(migratedCaller),
+            migratedCaller
+        )
+    }
+
+    @Test
+    fun `record methods and component accessors participate in exact provider propagation`() {
+        val payload = javaFile(
+            "RecordPayload.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public record RecordPayload(ItemStack stack) {
+                public static RecordPayload read(CompoundTag tag) {
+                    return new RecordPayload(ItemStack.of(tag.getCompound("Stack")));
+                }
+            }
+            """.trimIndent()
+        )
+        val caller = javaFile(
+            "RecordPayloadReader.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class RecordPayloadReader {
+                ItemStack readStack(Level level, CompoundTag tag) {
+                    return RecordPayload.read(tag).stack();
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migratedPayload = payload.readText()
+        val migratedCaller = caller.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(
+            Regex("""read\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+\)""")
+                .containsMatchIn(migratedPayload),
+            migratedPayload
+        )
+        assertTrue(migratedCaller.contains("RecordPayload.read(tag, level.registryAccess()).stack()"), migratedCaller)
+    }
+
+    @Test
+    fun `super calls bind only the direct superclass method in provider graphs`() {
+        val hierarchy = javaFile(
+            "PayloadHierarchy.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            class PayloadBase {
+                ItemStack stack;
+
+                protected CompoundTag write() {
+                    return stack.serializeNBT();
+                }
+            }
+
+            class PayloadChild extends PayloadBase {
+                @Override
+                protected CompoundTag write() {
+                    return super.write();
+                }
+            }
+            """.trimIndent()
+        )
+        val caller = javaFile(
+            "PayloadHierarchyReader.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.Level;
+
+            public class PayloadHierarchyReader {
+                CompoundTag write(Level level, PayloadChild payload) {
+                    return payload.write();
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migratedHierarchy = hierarchy.readText()
+        val migratedCaller = caller.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(
+            Regex("""PayloadBase[\s\S]*write\((?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+\)""")
+                .containsMatchIn(migratedHierarchy),
+            migratedHierarchy
+        )
+        assertTrue(Regex("""super\.write\(\w+\)""").containsMatchIn(migratedHierarchy), migratedHierarchy)
+        assertTrue(migratedCaller.contains("payload.write(level.registryAccess())"), migratedCaller)
+    }
+
+    @Test
+    fun `external Block placement override keeps its target signature and uses its contract provider`() {
+        val block = javaFile(
+            "PlacementBlock.java",
+            """
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class PlacementBlock extends Block {
+                @Override
+                public void setPlacedBy(Level level, BlockPos pos, BlockState state, LivingEntity placer, ItemStack stack) {
+                    CompoundTag saved = stack.serializeNBT();
+                    super.setPlacedBy(level, pos, state, placer, stack);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = block.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(migrated.contains("stack.saveOptional(level.registryAccess())"), migrated)
+        assertFalse(
+            Regex("""setPlacedBy\([^)]*HolderLookup\.Provider""").containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(migrated.contains("super.setPlacedBy(level, pos, state, placer, stack);"), migrated)
+    }
+
+    @Test
+    fun `project type names ending in ItemStack do not impersonate vanilla ItemStack factories`() {
+        val wrapper = javaFile(
+            "FilterItemStack.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class FilterItemStack {
+                public static FilterItemStack of(ItemStack filter) {
+                    return new FilterItemStack();
+                }
+
+                public static FilterItemStack of(CompoundTag tag) {
+                    return of(ItemStack.of(tag));
+                }
+            }
+            """.trimIndent()
+        )
+        val behaviour = javaFile(
+            "FilteringBehaviour.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class FilteringBehaviour {
+                FilterItemStack filter;
+
+                public void setFilter(ItemStack stack) {
+                    filter = FilterItemStack.of(stack);
+                }
+
+                public void read(Level level, CompoundTag tag) {
+                    filter = FilterItemStack.of(tag);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migratedWrapper = wrapper.readText()
+        val migratedBehaviour = behaviour.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(migratedWrapper.contains("of(ItemStack filter)"), migratedWrapper)
+        assertFalse(Regex("""of\(ItemStack filter,\s*(?:net\.minecraft\.core\.)?HolderLookup\.Provider""")
+            .containsMatchIn(migratedWrapper), migratedWrapper)
+        assertTrue(migratedWrapper.contains("ItemStack.parseOptional("), migratedWrapper)
+        assertTrue(migratedBehaviour.contains("setFilter(ItemStack stack)"), migratedBehaviour)
+        assertTrue(migratedBehaviour.contains("FilterItemStack.of(stack);"), migratedBehaviour)
+        assertFalse(migratedBehaviour.contains("FilterItemStack.parseOptional"), migratedBehaviour)
+        assertTrue(
+            migratedBehaviour.contains("FilterItemStack.of(tag, level.registryAccess())"),
+            migratedBehaviour
+        )
+    }
+
+    @Test
+    fun `provider contracts stay closed across external BlockEntity calls`() {
+        val snapshot = javaFile(
+            "SnapshotHelper.java",
+            """
+            package com.example;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            class SnapshotHelper {
+                Object capture(Level level, BlockEntity blockEntity) {
+                    return blockEntity.getUpdateTag();
+                }
+                Object invoke(Level level, BlockEntity blockEntity) {
+                    return capture(level, blockEntity);
+                }
+            }
+            """.trimIndent()
+        )
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migratedSnapshot = snapshot.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(
+            Regex("""blockEntity\.getUpdateTag\((?:modporterRegistries|level\.registryAccess\(\))\)""")
+                .containsMatchIn(migratedSnapshot),
+            migratedSnapshot
+        )
+        assertTrue(
+            Regex("""capture\(level, blockEntity(?:, level\.registryAccess\(\))?\)""")
+                .containsMatchIn(migratedSnapshot),
+            migratedSnapshot
+        )
     }
 
     private fun javaFile(name: String, source: String): Path {

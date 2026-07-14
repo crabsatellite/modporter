@@ -102,6 +102,10 @@ tasks.register<Test>("realModBenchmark") {
     group = "verification"
 
     useJUnitPlatform()
+    maxHeapSize = System.getenv("MODPORTER_BENCHMARK_MAX_HEAP") ?: "4g"
+    extensions.configure<org.gradle.testing.jacoco.plugins.JacocoTaskExtension> {
+        isEnabled = false
+    }
     environment("MODPORTER_REAL_MOD_TEST", "true")
     filter {
         includeTestsMatching("com.modporter.integration.RealModBenchmarkTest")
@@ -122,6 +126,10 @@ tasks.register<Test>("strictRealModBenchmark") {
     group = "verification"
 
     useJUnitPlatform()
+    maxHeapSize = System.getenv("MODPORTER_BENCHMARK_MAX_HEAP") ?: "4g"
+    extensions.configure<org.gradle.testing.jacoco.plugins.JacocoTaskExtension> {
+        isEnabled = false
+    }
     environment("MODPORTER_REAL_MOD_TEST", "true")
     defaultEnvironment("MODPORTER_BENCHMARK_STRICT_RUNTIME", "true")
     defaultEnvironment("MODPORTER_BENCHMARK_CASES", realModBenchmarkCaseIds())

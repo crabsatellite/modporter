@@ -754,8 +754,9 @@
                 body.contains("executableCode.indexOf(qualifiedEmpty, cursor)") &&
                 body.contains("registryAccessExpressionAt(source, index") &&
                 body.contains("edits += index until index + qualifiedEmpty.length to replacement") &&
+                body.contains("Cannot resolve exact HolderLookup.Provider for executable") &&
                 body.contains("return applyStringEdits(source, edits)"),
-            "RegistryAccess.EMPTY fallback migration must replace only executable token ranges"
+            "RegistryAccess.EMPTY fallback migration must replace exact executable ranges or fail closed"
         )
         assertTrue(
             offenders.isEmpty(),

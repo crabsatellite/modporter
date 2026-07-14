@@ -135,13 +135,40 @@
     "rationale": "TerraBlender dependency metadata is migrated by dependency mod id, not by a benchmark mod rule."
   },
   {
+    "id": "catnip",
+    "type": "library-api",
+    "packagePrefixes": [
+      "net.createmod.catnip."
+    ],
+    "ruleIdPrefixes": [
+      "catnip-"
+    ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalProviderContracts.kt",
+      "src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt"
+    ],
+    "rationale": "Catnip is a published helper library used by source projects; migration contracts target its public API surface rather than a benchmark mod."
+  },
+  {
+    "id": "ponder",
+    "type": "library-api",
+    "packagePrefixes": [
+      "net.createmod.ponder."
+    ],
+    "ruleIdPrefixes": [],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalProviderContracts.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/ExactProjectProviderCallMigration.kt"
+    ],
+    "rationale": "Ponder exposes a public scene API whose world facade owns the target registry provider; the contract applies to every Ponder consumer."
+  },
+  {
     "id": "dependency-coordinate-normalization",
     "type": "dependency-coordinate-api",
     "packagePrefixes": [
       "com.blamejared.crafttweaker",
       "com.simibubi.create",
       "dev.engine-room.flywheel",
-      "net.createmod.ponder",
       "org.valkyrienskies",
       "sereneseasons.",
       "squeek.appleskin",
@@ -153,7 +180,7 @@
       "curse.maven:",
       "dev.engine-room.flywheel:",
       "maven.modrinth:",
-      "net.createmod.ponder",
+      "net.createmod.ponder:",
       "org.valkyrienskies",
       "squeek.appleskin:",
       "vazkii.botania"

@@ -5,10 +5,15 @@ import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.ast.CompilationUnit
 import com.github.javaparser.ast.Node
 import com.github.javaparser.ast.body.CallableDeclaration
+import com.github.javaparser.ast.body.AnnotationDeclaration
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
+import com.github.javaparser.ast.body.EnumDeclaration
+import com.github.javaparser.ast.body.FieldDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
+import com.github.javaparser.ast.body.RecordDeclaration
 import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.body.VariableDeclarator
+import com.github.javaparser.ast.expr.BinaryExpr
 import com.github.javaparser.ast.expr.CastExpr
 import com.github.javaparser.ast.expr.BooleanLiteralExpr
 import com.github.javaparser.ast.expr.CharLiteralExpr
@@ -25,20 +30,29 @@ import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.ast.expr.ObjectCreationExpr
+import com.github.javaparser.ast.expr.PatternExpr
+import com.github.javaparser.ast.expr.SuperExpr
 import com.github.javaparser.ast.expr.ThisExpr
 import com.github.javaparser.ast.expr.TypeExpr
+import com.github.javaparser.ast.expr.UnaryExpr
+import com.github.javaparser.ast.stmt.BlockStmt
+import com.github.javaparser.ast.stmt.BreakStmt
+import com.github.javaparser.ast.stmt.ContinueStmt
+import com.github.javaparser.ast.stmt.IfStmt
+import com.github.javaparser.ast.stmt.ReturnStmt
+import com.github.javaparser.ast.stmt.Statement
+import com.github.javaparser.ast.stmt.ThrowStmt
 import com.github.javaparser.ast.type.Type
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.readText
 
-internal fun exactEnclosingNamedClass(node: Node): ClassOrInterfaceDeclaration? {
+internal fun exactEnclosingNamedClass(node: Node): TypeDeclaration<*>? {
     var cursor: Node? = node
     while (cursor != null) {
         when (cursor) {
-            is ClassOrInterfaceDeclaration -> return cursor
-            is TypeDeclaration<*> -> return null
             is ObjectCreationExpr -> if (cursor.anonymousClassBody.isPresent) return null
+            is TypeDeclaration<*> -> return cursor
         }
         cursor = cursor.parentNode.orElse(null)
     }
@@ -47,6 +61,12 @@ internal fun exactEnclosingNamedClass(node: Node): ClassOrInterfaceDeclaration? 
 
 /** Lazily resolves project-source types from explicit Java structure, without heuristic fallback. */
 internal class JavaProjectTypeIndex private constructor(private val sourceRoot: Path) {
+    data class ExactProjectMethod(
+        val owner: String,
+        val file: Path,
+        val method: MethodDeclaration
+    )
+
     private data class TypeRef(
         val name: String,
         val arguments: List<TypeRef> = emptyList(),
@@ -56,11 +76,23 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     private data class TypeInfo(
         val qualifiedName: String,
         val unit: CompilationUnit,
-        val declaration: ClassOrInterfaceDeclaration,
+        val declaration: TypeDeclaration<*>,
         val typeParameters: List<String>,
         val typeParameterBounds: Map<String, TypeRef>,
         val directSupers: List<TypeRef>
     )
+
+    private data class FunctionalMethodSignature(
+        val name: String,
+        val parameterTypes: List<TypeRef>,
+        val returnType: TypeRef
+    )
+
+    private fun methods(info: TypeInfo): List<MethodDeclaration> =
+        info.declaration.members.filterIsInstance<MethodDeclaration>()
+
+    private fun fields(info: TypeInfo): List<FieldDeclaration> =
+        info.declaration.members.filterIsInstance<FieldDeclaration>()
 
     private val parser = JavaParser(
         ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
@@ -87,6 +119,24 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         return resolved.name.takeIf { resolved.arrayDepth == 0 }
     }
 
+    fun expressionRawType(expression: Expression, use: Node): String? {
+        expressionType(expression, use)?.let { return it }
+        val call = expression as? MethodCallExpr ?: return null
+        val ownerName = projectMethodOwner(call) ?: return null
+        val owner = loadType(ownerName) ?: return null
+        val candidates = methods(owner).filter { method ->
+            method.nameAsString == call.nameAsString && method.parameters.size == call.arguments.size
+        }
+        if (candidates.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous project method ${owner.qualifiedName}.${call.nameAsString}/${call.arguments.size}"
+            )
+        }
+        val method = candidates.singleOrNull() ?: return null
+        val raw = parseType(method.typeAsString).copy(arguments = emptyList())
+        return resolveType(raw, owner, emptyMap())?.name
+    }
+
     fun isExpressionAssignableTo(expression: Expression, use: Node, expectedType: String): Boolean {
         val owner = exactEnclosingNamedClass(use) ?: return false
         val ownerInfo = typeInfo(owner)
@@ -99,7 +149,16 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val owner = exactEnclosingNamedClass(use) ?: return null
         val ownerInfo = typeInfo(owner)
             ?: throw IllegalStateException("Cannot index type owner '${owner.nameAsString}'")
-        val resolved = resolveType(parseType(type.asString()), ownerInfo, emptyMap()) ?: return null
+        val resolved = resolveLexicalType(parseType(type.asString()), use, ownerInfo, emptyMap()) ?: return null
+        return resolved.name.takeIf { resolved.arrayDepth == 0 }
+    }
+
+    fun declaredRawType(type: Type, use: Node): String? {
+        val owner = exactEnclosingNamedClass(use) ?: return null
+        val ownerInfo = typeInfo(owner)
+            ?: throw IllegalStateException("Cannot index type owner '${owner.nameAsString}'")
+        val raw = parseType(type.asString()).copy(arguments = emptyList())
+        val resolved = resolveLexicalType(raw, use, ownerInfo, emptyMap()) ?: return null
         return resolved.name.takeIf { resolved.arrayDepth == 0 }
     }
 
@@ -107,9 +166,69 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val owner = exactEnclosingNamedClass(use) ?: return null
         val ownerInfo = typeInfo(owner)
             ?: throw IllegalStateException("Cannot index type owner '${owner.nameAsString}'")
-        val resolved = resolveType(parseType(type.asString()), ownerInfo, emptyMap()) ?: return null
+        val resolved = resolveLexicalType(parseType(type.asString()), use, ownerInfo, emptyMap()) ?: return null
         if (resolved.arrayDepth != 0 || resolved.arguments.any { it.arrayDepth != 0 }) return null
         return resolved.name to resolved.arguments.map { it.name }
+    }
+
+    fun isExactInstanceFieldReference(reference: NameExpr): Boolean {
+        val owner = exactEnclosingNamedClass(reference) ?: return false
+        val ownerInfo = typeInfo(owner)
+            ?: throw IllegalStateException("Cannot index expression owner '${owner.nameAsString}'")
+        if (hasVisibleLexicalValueBinding(reference.nameAsString, reference)) return false
+        if (isTypeAssignableTo(ownerInfo.qualifiedName, "net.minecraft.world.level.block.entity.BlockEntity") &&
+            reference.nameAsString in setOf("level", "worldPosition")
+        ) {
+            return true
+        }
+        return exactFieldStaticness(
+            TypeRef(ownerInfo.qualifiedName),
+            reference.nameAsString,
+            mutableSetOf()
+        ) == false
+    }
+
+    fun isExactProjectMethodArgumentUnused(call: MethodCallExpr, argumentIndex: Int): Boolean {
+        if (argumentIndex !in call.arguments.indices) return false
+        val ownerName = projectMethodOwner(call) ?: return false
+        val owner = loadType(ownerName) ?: return false
+        val candidates = methods(owner).filter { method ->
+            method.nameAsString == call.nameAsString && method.parameters.size == call.arguments.size
+        }
+        if (candidates.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous project method ${owner.qualifiedName}.${call.nameAsString}/${call.arguments.size}"
+            )
+        }
+        val method = candidates.singleOrNull() ?: return false
+        val parameterName = method.parameters[argumentIndex].nameAsString
+        return method.body.orElse(null)
+            ?.findAll(NameExpr::class.java)
+            ?.none { it.nameAsString == parameterName }
+            ?: false
+    }
+
+    fun isExactInstanceMethodCall(call: MethodCallExpr): Boolean {
+        if (call.scope.isPresent) return false
+        val ownerDeclaration = exactEnclosingNamedClass(call) ?: return false
+        val owner = typeInfo(ownerDeclaration)
+            ?: throw IllegalStateException("Cannot index call owner '${ownerDeclaration.nameAsString}'")
+        if (isTypeAssignableTo(owner.qualifiedName, "net.minecraft.world.level.block.entity.BlockEntity") &&
+            (call.nameAsString to call.arguments.size) in setOf("getBlockState" to 0, "isRemoved" to 0)
+        ) {
+            return true
+        }
+        val methodOwner = projectMethodOwner(call) ?: return false
+        val info = loadType(methodOwner) ?: return false
+        val candidates = methods(info).filter { method ->
+            method.nameAsString == call.nameAsString && method.parameters.size == call.arguments.size
+        }
+        if (candidates.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous project method ${info.qualifiedName}.${call.nameAsString}/${call.arguments.size}"
+            )
+        }
+        return candidates.singleOrNull()?.isStatic == false
     }
 
     fun projectMethodOwner(call: MethodCallExpr, declarationArity: Int = call.arguments.size): String? {
@@ -117,10 +236,78 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         return resolveProjectMethodOwner(receiver, call.nameAsString, declarationArity, mutableSetOf())
     }
 
+    fun projectMethodTypeParameterCount(call: MethodCallExpr): Int? {
+        val ownerName = projectMethodOwner(call) ?: return null
+        val owner = loadType(ownerName) ?: return null
+        val candidates = methods(owner).filter { method ->
+            method.nameAsString == call.nameAsString && method.parameters.size == call.arguments.size
+        }
+        if (candidates.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous project method ${owner.qualifiedName}.${call.nameAsString}/${call.arguments.size}"
+            )
+        }
+        return candidates.singleOrNull()?.typeParameters?.size
+    }
+
     fun methodCallReceiverType(call: MethodCallExpr): String? = methodCallReceiverTypeRef(call)?.name
 
     fun isTypeAssignableTo(actualType: String, expectedType: String): Boolean =
         isAssignableTo(TypeRef(actualType), expectedType, mutableSetOf())
+
+    fun exactProjectOverrideFamily(
+        seed: MethodDeclaration,
+        rootVerifier: ((MethodDeclaration) -> Boolean)? = null
+    ): List<ExactProjectMethod>? {
+        if (seed.isStatic) return null
+        val seedOwner = exactEnclosingNamedClass(seed)?.fullyQualifiedName?.orElse(null) ?: return null
+        val seedTypes = seed.parameters.map { parameter ->
+            declaredType(parameter.type, seed) ?: return null
+        }
+        val methodName = seed.nameAsString
+        Files.walk(sourceRoot).use { stream ->
+            stream.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".java") }
+                .filter { file -> runCatching { file.readText().contains("$methodName(") }.getOrDefault(false) }
+                .forEach(::parseFile)
+        }
+        val candidates = typesByQualifiedName.values.flatMap { info ->
+            methods(info).mapNotNull { method ->
+                if (method.isStatic || method.nameAsString != methodName || method.parameters.size != seedTypes.size) {
+                    return@mapNotNull null
+                }
+                val parameterTypes = method.parameters.map { parameter ->
+                    declaredType(parameter.type, method) ?: return@mapNotNull null
+                }
+                if (parameterTypes != seedTypes) return@mapNotNull null
+                val file = unitsByFile.entries.singleOrNull { (_, unit) -> unit === info.unit }?.key
+                    ?: throw IllegalStateException("Cannot locate source file for ${info.qualifiedName}.$methodName")
+                ExactProjectMethod(info.qualifiedName, file, method)
+            }
+        }
+        val seedCandidate = candidates.singleOrNull { it.owner == seedOwner && it.method === seed } ?: return null
+        val connected = linkedSetOf(seedCandidate)
+        var grew: Boolean
+        do {
+            grew = false
+            candidates.filterNot { it in connected }.forEach { candidate ->
+                if (connected.any { current ->
+                        isTypeAssignableTo(candidate.owner, current.owner) ||
+                            isTypeAssignableTo(current.owner, candidate.owner)
+                    }
+                ) {
+                    if (connected.add(candidate)) grew = true
+                }
+            }
+        } while (grew)
+        val roots = connected.filter { candidate ->
+            connected.none { other ->
+                other !== candidate && isTypeAssignableTo(candidate.owner, other.owner)
+            }
+        }
+        val root = roots.singleOrNull() ?: return null
+        if (!(rootVerifier?.invoke(root.method) ?: isProvenNonOverride(root.method))) return null
+        return connected.sortedBy { it.owner }
+    }
 
     fun exactDirectFieldWithType(
         root: NameExpr,
@@ -132,7 +319,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val rootType = resolveExpression(root, use, ownerInfo, emptyMap()) ?: return null
         val rootInfo = loadType(rootType.name) ?: return null
         val substitutions = substitutions(rootInfo, rootType)
-        val matches = rootInfo.declaration.fields.filterNot { it.isStatic }.flatMap { declaration ->
+        val matches = fields(rootInfo).filterNot { it.isStatic }.flatMap { declaration ->
             declaration.variables.mapNotNull { field ->
                 val type = resolveType(parseType(field.typeAsString), rootInfo, substitutions)
                     ?: return@mapNotNull null
@@ -264,7 +451,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     private fun collectProjectDeclarations(
         receiver: TypeRef,
         visited: MutableSet<String>
-    ): List<ClassOrInterfaceDeclaration> {
+    ): List<TypeDeclaration<*>> {
         if (!visited.add(receiver.toString())) return emptyList()
         val info = loadType(receiver.name) ?: return emptyList()
         val substitutions = substitutions(info, receiver)
@@ -281,7 +468,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         if (!visited.add(receiver.toString())) return emptyList()
         val info = loadType(receiver.name) ?: return emptyList()
         val substitutions = substitutions(info, receiver)
-        val direct = info.declaration.fields.filterNot { it.isStatic }.flatMap { declaration ->
+        val direct = fields(info).filterNot { it.isStatic }.flatMap { declaration ->
             declaration.variables.mapNotNull { field ->
                 val type = resolveType(parseType(field.typeAsString), info, substitutions)
                     ?: return@mapNotNull null
@@ -303,6 +490,13 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val scope = call.scope.orElse(null)
         val receiver = if (scope == null) {
             TypeRef(ownerInfo.qualifiedName)
+        } else if (scope is SuperExpr) {
+            val qualifiedSuper = scope.typeName.orElse(null)?.asString()
+            if (qualifiedSuper != null) {
+                resolveType(TypeRef(qualifiedSuper), ownerInfo, emptyMap()) ?: return null
+            } else {
+                directSuperclass(ownerInfo) ?: return null
+            }
         } else {
             resolveExpression(scope, call, ownerInfo, emptyMap()) ?: if (scope is NameExpr) {
                 if (hasVisibleLexicalValueBinding(scope.nameAsString, scope)) null
@@ -312,6 +506,15 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             } ?: return null
         }
         return receiver
+    }
+
+    private fun directSuperclass(info: TypeInfo): TypeRef? {
+        val declaration = info.declaration as? ClassOrInterfaceDeclaration ?: return null
+        if (declaration.isInterface || declaration.extendedTypes.isEmpty()) return null
+        if (declaration.extendedTypes.size != 1) {
+            throw IllegalStateException("Class ${info.qualifiedName} has multiple direct superclasses")
+        }
+        return resolveType(parseType(declaration.extendedTypes.single().asString()), info, emptyMap())
     }
 
     fun argumentsMatchProjectMethodExcluding(
@@ -335,6 +538,25 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     fun argumentsMatchTypes(call: MethodCallExpr, expectedTypes: List<String>): Boolean {
         if (call.arguments.size != expectedTypes.size) return false
         return expressionsMatchTypes(call.arguments.toList(), call, expectedTypes)
+    }
+
+    fun resolvesToUniqueProjectMethodSignature(
+        call: MethodCallExpr,
+        expectedTypes: List<String>,
+        excludedParameterIndex: Int? = null
+    ): Boolean {
+        if (excludedParameterIndex != null && excludedParameterIndex !in expectedTypes.indices) return false
+        val expectedCallArity = expectedTypes.size - if (excludedParameterIndex == null) 0 else 1
+        if (call.arguments.size != expectedCallArity) return false
+        val receiver = methodCallReceiverTypeRef(call) ?: return false
+        if (!hasClosedProjectMethodHierarchy(receiver.name)) return false
+        val signatures = collectProjectMethodSignatures(
+            receiver,
+            call.nameAsString,
+            expectedTypes.size,
+            mutableSetOf()
+        ) ?: return false
+        return signatures.singleOrNull() == expectedTypes
     }
 
     fun argumentsMatchTypesExcluding(
@@ -398,7 +620,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         if (!visited.add(receiver.toString())) return false
         val declarationInfo = loadType(receiver.name) ?: return false
         val substitutions = substitutions(declarationInfo, receiver)
-        val methods = declarationInfo.declaration.methods.filter {
+        val methods = methods(declarationInfo).filter {
             it.nameAsString == name && it.parameters.size == declarationArity
         }
         val matching = methods.filter { method ->
@@ -432,6 +654,36 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         }
     }
 
+    private fun collectProjectMethodSignatures(
+        receiver: TypeRef,
+        name: String,
+        declarationArity: Int,
+        visited: MutableSet<String>
+    ): Set<List<String>>? {
+        if (!visited.add(receiver.toString())) return emptySet()
+        val declarationInfo = loadType(receiver.name) ?: return null
+        val substitutions = substitutions(declarationInfo, receiver)
+        val signatures = linkedSetOf<List<String>>()
+        methods(declarationInfo)
+            .filter { it.nameAsString == name && it.parameters.size == declarationArity }
+            .forEach { method ->
+                val parameterTypes = method.parameters.map { parameter ->
+                    resolveType(parseType(parameter.typeAsString), declarationInfo, substitutions)?.name
+                        ?: return null
+                }
+                signatures += parameterTypes
+            }
+        resolvedSupers(declarationInfo, substitutions).forEach { superType ->
+            signatures += collectProjectMethodSignatures(
+                superType,
+                name,
+                declarationArity,
+                visited
+            ) ?: return null
+        }
+        return signatures
+    }
+
     fun hasClosedProjectMethodHierarchy(qualifiedName: String): Boolean =
         hasClosedProjectMethodHierarchy(qualifiedName, mutableSetOf())
 
@@ -461,9 +713,18 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         visited: MutableSet<String>
     ): Boolean {
         if (!visited.add(receiver.toString())) return false
+        knownClosedExternalMethodSurfaces[receiver.name]?.let { surface ->
+            return surface.any { signature ->
+                signature.name == name &&
+                    signature.parameterTypes.size == parameterTypes.size &&
+                    signature.parameterTypes.zip(parameterTypes).all { (expected, actual) ->
+                        expected == actual.name && actual.arrayDepth == 0
+                    }
+            }
+        }
         val info = loadType(receiver.name) ?: return true
         val substitutions = substitutions(info, receiver)
-        val sameArity = info.declaration.methods.filter {
+        val sameArity = methods(info).filter {
             !it.isPrivate && it.nameAsString == name && it.parameters.size == parameterTypes.size
         }
         if (sameArity.any { candidate ->
@@ -485,10 +746,12 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         visited: MutableSet<String>
     ): Boolean {
         if (!visited.add(qualifiedName)) return true
+        if (qualifiedName in knownClosedExternalMethodSurfaces) return true
         val info = loadType(qualifiedName) ?: return qualifiedName.startsWith("java.lang.")
         return info.directSupers.all { raw ->
             val resolved = resolveType(raw, info, emptyMap()) ?: return@all false
             resolved.name.startsWith("java.lang.") ||
+                resolved.name in knownClosedExternalMethodSurfaces ||
                 (loadType(resolved.name) != null && hasClosedProjectMethodHierarchy(resolved.name, visited))
         }
     }
@@ -508,16 +771,16 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 }
                 array.copy(arrayDepth = array.arrayDepth - 1)
             }
-            is CastExpr -> resolveType(parseType(expression.typeAsString), owner, substitutions)
+            is CastExpr -> resolveLexicalType(parseType(expression.typeAsString), use, owner, substitutions)
             is BooleanLiteralExpr -> TypeRef("boolean")
             is CharLiteralExpr -> TypeRef("char")
             is DoubleLiteralExpr -> TypeRef(if (expression.value.lowercase().endsWith("f")) "float" else "double")
             is IntegerLiteralExpr -> TypeRef("int")
             is LongLiteralExpr -> TypeRef("long")
             is StringLiteralExpr -> TypeRef("java.lang.String")
-            is ObjectCreationExpr -> resolveType(parseType(expression.typeAsString), owner, substitutions)
+            is ObjectCreationExpr -> resolveLexicalType(parseType(expression.typeAsString), use, owner, substitutions)
             is ThisExpr -> TypeRef(owner.qualifiedName)
-            is TypeExpr -> resolveType(parseType(expression.typeAsString), owner, substitutions)
+            is TypeExpr -> resolveLexicalType(parseType(expression.typeAsString), use, owner, substitutions)
             is NameExpr -> resolveName(expression.nameAsString, use, owner, substitutions)
             is FieldAccessExpr -> {
                 val scope = resolveExpression(expression.scope, use, owner, substitutions) ?: return null
@@ -544,10 +807,19 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 mutableSetOf()
             )
         }
-        val scope = resolveExpression(scopeExpression, use, owner, substitutions) ?: return null
+        val scope = resolveExpression(scopeExpression, use, owner, substitutions) ?: if (scopeExpression is NameExpr) {
+            if (hasVisibleLexicalValueBinding(scopeExpression.nameAsString, scopeExpression)) null
+            else resolveType(TypeRef(scopeExpression.nameAsString), owner, substitutions)
+        } else {
+            null
+        } ?: return null
         if (scope.name == "java.util.List" && call.nameAsString == "get" && call.arguments.size == 1) {
             return scope.arguments.singleOrNull()
                 ?: throw IllegalStateException("Raw List receiver has no exact element type for '$call'")
+        }
+        if (scope.name == "java.util.Map" && call.nameAsString == "get" && call.arguments.size == 1) {
+            return scope.arguments.getOrNull(1)
+                ?: throw IllegalStateException("Raw Map receiver has no exact value type for '$call'")
         }
         if (scope.name == "java.util.Map" && call.nameAsString == "values" && call.arguments.isEmpty()) {
             val valueType = scope.arguments.getOrNull(1)
@@ -572,7 +844,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         if (!visited.add(receiver.toString())) return null
         val info = loadType(receiver.name) ?: return null
         val substitutions = substitutions(info, receiver)
-        val methods = info.declaration.methods.filter {
+        val methods = methods(info).filter {
             it.nameAsString == call.nameAsString && it.parameters.size == call.arguments.size
         }
         val actualTypes = call.arguments.map { argument ->
@@ -580,7 +852,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         }
         val matching = methods.filter { method ->
             val expected = method.parameters.map { parameter ->
-                resolveType(parseType(parameter.typeAsString), info, substitutions) ?: return@filter false
+                resolveLexicalType(parseType(parameter.typeAsString), method, info, substitutions) ?: return@filter false
             }
             actualTypes.zip(expected).all { (actual, target) ->
                 isAssignableTo(actual, target.name, mutableSetOf())
@@ -590,7 +862,10 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             throw IllegalStateException("Ambiguous typed method '${call.nameAsString}/${call.arguments.size}' on ${receiver.name}")
         }
         matching.singleOrNull()?.let { method ->
-            return resolveType(parseType(method.typeAsString), info, substitutions)
+            return resolveLexicalType(parseType(method.typeAsString), method, info, substitutions)
+        }
+        if (call.arguments.isEmpty()) {
+            resolveRecordComponent(info, receiver, call.nameAsString)?.let { return it }
         }
         return exactSingle(
             resolvedSupers(info, substitutions).mapNotNull {
@@ -608,9 +883,10 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     ): String? {
         if (!visited.add(receiver.toString())) return null
         val info = loadType(receiver.name) ?: return null
-        val methods = info.declaration.methods.filter { it.nameAsString == name && it.parameters.size == arity }
+        val methods = methods(info).filter { it.nameAsString == name && it.parameters.size == arity }
         if (methods.size > 1) throw IllegalStateException("Ambiguous method '$name/$arity' on ${receiver.name}")
         if (methods.size == 1) return info.qualifiedName
+        if (arity == 0 && resolveRecordComponent(info, receiver, name) != null) return info.qualifiedName
         val substitutions = substitutions(info, receiver)
         return exactSingle(
             resolvedSupers(info, substitutions).mapNotNull {
@@ -624,6 +900,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         if (actual.arrayDepth != 0) return false
         if (actual.name == expectedType) return true
         if (!visited.add(actual.toString())) return false
+        if (expectedType in knownExternalAssignableTypes[actual.name].orEmpty()) return true
         val info = loadType(actual.name) ?: return false
         val substitutions = substitutions(info, actual)
         return resolvedSupers(info, substitutions).any { isAssignableTo(it, expectedType, visited) }
@@ -638,17 +915,28 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         if (!visited.add(receiver.toString())) return null
         val info = loadType(receiver.name) ?: return null
         val substitutions = substitutions(info, receiver)
-        val methods = info.declaration.methods.filter { it.nameAsString == name && it.parameters.size == arity }
+        val methods = methods(info).filter { it.nameAsString == name && it.parameters.size == arity }
         if (methods.size > 1) {
             throw IllegalStateException("Ambiguous method '$name/$arity' on ${receiver.name}")
         }
         methods.singleOrNull()?.let { method ->
-            return resolveType(parseType(method.typeAsString), info, substitutions)
+            return resolveLexicalType(parseType(method.typeAsString), method, info, substitutions)
         }
+        if (arity == 0) resolveRecordComponent(info, receiver, name)?.let { return it }
         return exactSingle(
             resolvedSupers(info, substitutions).mapNotNull { resolveProjectMethod(it, name, arity, visited) },
             "method '$name/$arity' inherited by ${receiver.name}"
         )
+    }
+
+    private fun resolveRecordComponent(info: TypeInfo, receiver: TypeRef, name: String): TypeRef? {
+        val record = info.declaration as? RecordDeclaration ?: return null
+        val matches = record.parameters.filter { it.nameAsString == name }
+        if (matches.size > 1) {
+            throw IllegalStateException("Ambiguous record component '$name' on ${receiver.name}")
+        }
+        val component = matches.singleOrNull() ?: return null
+        return resolveType(parseType(component.typeAsString), info, substitutions(info, receiver))
     }
 
     private fun resolveName(
@@ -660,6 +948,9 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         enclosingLambdaBinding(name, use)?.let { (lambda, parameterIndex) ->
             return resolveLambdaParameter(lambda, parameterIndex, owner, substitutions)
         }
+        visiblePatternBinding(name, use)?.let { pattern ->
+            return resolveLexicalType(parseType(pattern.typeAsString), pattern, owner, substitutions)
+        }
         val callable = use.findAncestor(CallableDeclaration::class.java).orElse(null)
         if (callable != null) {
             val parameters = callable.parameters.filter { it.nameAsString == name }
@@ -667,7 +958,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 throw IllegalStateException("Ambiguous callable parameter '$name' at $use")
             }
             parameters.singleOrNull()?.let { parameter ->
-                return resolveType(parseType(parameter.typeAsString), owner, substitutions)
+                return resolveLexicalType(parseType(parameter.typeAsString), parameter, owner, substitutions)
             }
             val localCandidates = callable.findAll(VariableDeclarator::class.java).mapNotNull { variable ->
                 if (variable.nameAsString != name || !visibleBefore(variable, use)) return@mapNotNull null
@@ -679,7 +970,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 throw IllegalStateException("Ambiguous visible local '$name' at $use")
             }
             locals.singleOrNull()?.let { (variable, _) ->
-                return resolveType(parseType(variable.typeAsString), owner, substitutions)
+                return resolveLexicalType(parseType(variable.typeAsString), variable, owner, substitutions)
             }
         }
         return resolveField(TypeRef(owner.qualifiedName), name, mutableSetOf())
@@ -687,12 +978,99 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
 
     private fun hasVisibleLexicalValueBinding(name: String, use: Node): Boolean {
         if (enclosingLambdaBinding(name, use) != null) return true
+        if (visiblePatternBinding(name, use) != null) return true
         val callable = use.findAncestor(CallableDeclaration::class.java).orElse(null) ?: return false
         if (callable.parameters.any { it.nameAsString == name }) return true
         return callable.findAll(VariableDeclarator::class.java).any { variable ->
             variable.nameAsString == name && visibleBefore(variable, use) &&
                 lexicalScopeDistance(variable, use) != null
         }
+    }
+
+    private fun visiblePatternBinding(name: String, use: Node): PatternExpr? {
+        val callable = use.findAncestor(CallableDeclaration::class.java).orElse(null) ?: return null
+        val bindings = callable.findAll(PatternExpr::class.java).filter { pattern ->
+            pattern.nameAsString == name && patternBindingDominatesUse(pattern, use)
+        }
+        if (bindings.size > 1) {
+            throw IllegalStateException("Ambiguous visible pattern binding '$name' at $use")
+        }
+        return bindings.singleOrNull()
+    }
+
+    private fun patternBindingDominatesUse(pattern: PatternExpr, use: Node): Boolean {
+        val patternCallable = pattern.findAncestor(CallableDeclaration::class.java).orElse(null) ?: return false
+        val useCallable = use.findAncestor(CallableDeclaration::class.java).orElse(null) ?: return false
+        if (patternCallable !== useCallable) return false
+        val instanceOf = pattern.parentNode.orElse(null) ?: return false
+
+        var cursor: Node = instanceOf
+        while (true) {
+            val parent = cursor.parentNode.orElse(null) ?: break
+            when {
+                parent is BinaryExpr && parent.operator == BinaryExpr.Operator.AND -> {
+                    if ((parent.left === cursor || parent.left.isAncestorOf(cursor)) &&
+                        (parent.right === use || parent.right.isAncestorOf(use))
+                    ) return true
+                    cursor = parent
+                }
+                parent is EnclosedExpr -> cursor = parent
+                else -> break
+            }
+        }
+
+        val guard = instanceOf.findAncestor(IfStmt::class.java).orElse(null) ?: return false
+        if (!(guard.condition === instanceOf || guard.condition.isAncestorOf(instanceOf))) return false
+        if (guard.thenStmt === use || guard.thenStmt.isAncestorOf(use)) {
+            return conditionTrueImpliesPattern(guard.condition, instanceOf)
+        }
+        val elseStatement = guard.elseStmt.orElse(null)
+        if (elseStatement != null && (elseStatement === use || elseStatement.isAncestorOf(use))) {
+            return conditionFalseImpliesPattern(guard.condition, instanceOf)
+        }
+        if (!conditionFalseImpliesPattern(guard.condition, instanceOf) || !statementAlwaysExits(guard.thenStmt)) {
+            return false
+        }
+        val block = guard.parentNode.orElse(null) as? BlockStmt ?: return false
+        if (!(block === use || block.isAncestorOf(use))) return false
+        val guardIndex = block.statements.indexOfFirst { it === guard }
+        if (guardIndex < 0) return false
+        val containingStatement = block.statements.firstOrNull { statement ->
+            statement === use || statement.isAncestorOf(use)
+        } ?: return false
+        return block.statements.indexOf(containingStatement) > guardIndex
+    }
+
+    private fun conditionTrueImpliesPattern(condition: Expression, instanceOf: Node): Boolean = when (condition) {
+        is EnclosedExpr -> conditionTrueImpliesPattern(condition.inner, instanceOf)
+        is BinaryExpr -> condition.operator == BinaryExpr.Operator.AND && when {
+            condition.left === instanceOf || condition.left.isAncestorOf(instanceOf) ->
+                conditionTrueImpliesPattern(condition.left, instanceOf)
+            condition.right === instanceOf || condition.right.isAncestorOf(instanceOf) ->
+                conditionTrueImpliesPattern(condition.right, instanceOf)
+            else -> false
+        }
+        else -> condition === instanceOf
+    }
+
+    private fun conditionFalseImpliesPattern(condition: Expression, instanceOf: Node): Boolean = when (condition) {
+        is EnclosedExpr -> conditionFalseImpliesPattern(condition.inner, instanceOf)
+        is UnaryExpr -> condition.operator == UnaryExpr.Operator.LOGICAL_COMPLEMENT &&
+            conditionTrueImpliesPattern(condition.expression, instanceOf)
+        is BinaryExpr -> condition.operator == BinaryExpr.Operator.OR && when {
+            condition.left === instanceOf || condition.left.isAncestorOf(instanceOf) ->
+                conditionFalseImpliesPattern(condition.left, instanceOf)
+            condition.right === instanceOf || condition.right.isAncestorOf(instanceOf) ->
+                conditionFalseImpliesPattern(condition.right, instanceOf)
+            else -> false
+        }
+        else -> false
+    }
+
+    private fun statementAlwaysExits(statement: Statement): Boolean = when (statement) {
+        is ReturnStmt, is ThrowStmt, is ContinueStmt, is BreakStmt -> true
+        is BlockStmt -> statement.statements.lastOrNull()?.let(::statementAlwaysExits) == true
+        else -> false
     }
 
     private fun enclosingLambdaBinding(name: String, use: Node): Pair<LambdaExpr, Int>? {
@@ -732,6 +1110,8 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                     ?: throw IllegalStateException("Raw Map has no exact lambda parameter type for '$parentCall'")
             parentCall.nameAsString == "ifPresent" && argumentIndex == 0 && scope.name == "java.util.Optional" &&
                 parameterIndex == 0 -> scope.arguments.singleOrNull()
+            parentCall.nameAsString in setOf("map", "flatMap", "filter") && argumentIndex == 0 &&
+                scope.name == "java.util.Optional" && parameterIndex == 0 -> scope.arguments.singleOrNull()
             else -> null
         }
         return external ?: resolveProjectFunctionalParameter(
@@ -757,17 +1137,27 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         if (!visited.add(receiver.toString())) return null
         val info = loadType(receiver.name) ?: return null
         val substitutions = substitutions(info, receiver)
-        val methods = info.declaration.methods.filter {
+        val methods = methods(info).filter {
             it.nameAsString == call.nameAsString && it.parameters.size == call.arguments.size
         }
+        val lambdaArity = (call.arguments[argumentIndex] as? LambdaExpr)?.parameters?.size ?: return null
         val matching = methods.filter candidates@{ method ->
-            call.arguments.withIndex().filter { it.index != argumentIndex }.all { (index, argument) ->
+            val nonFunctionalArgumentsMatch = call.arguments.withIndex()
+                .filter { it.index != argumentIndex }
+                .all { (index, argument) ->
                 val actual = resolveExpression(argument, call, callerOwner, callerSubstitutions)
                     ?: return@candidates false
                 val expected = resolveType(parseType(method.parameters[index].typeAsString), info, substitutions)
                     ?: return@candidates false
                 isAssignableTo(actual, expected.name, mutableSetOf())
             }
+            if (!nonFunctionalArgumentsMatch) return@candidates false
+            val functionalType = resolveType(
+                parseType(method.parameters[argumentIndex].typeAsString),
+                info,
+                substitutions
+            ) ?: return@candidates false
+            exactFunctionalParameterTypes(functionalType)?.size == lambdaArity
         }
         if (matching.size > 1) {
             throw IllegalStateException(
@@ -780,13 +1170,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 info,
                 substitutions
             ) ?: return null
-            return when (functionalType.name) {
-                "java.util.function.Consumer", "java.util.function.Predicate", "java.util.function.Function" ->
-                    functionalType.arguments.firstOrNull().takeIf { lambdaParameterIndex == 0 }
-                "java.util.function.BiConsumer", "java.util.function.BiPredicate" ->
-                    functionalType.arguments.getOrNull(lambdaParameterIndex)
-                else -> null
-            }
+            return exactFunctionalParameterTypes(functionalType)?.getOrNull(lambdaParameterIndex)
         }
         return exactSingle(
             resolvedSupers(info, substitutions).mapNotNull {
@@ -804,6 +1188,97 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         )
     }
 
+    private fun exactFunctionalParameterTypes(type: TypeRef): List<TypeRef>? {
+        knownFunctionalMethod(type)?.let { return it.parameterTypes }
+        val methods = collectProjectAbstractMethods(type, mutableSetOf()) ?: return null
+        val contracts = methods
+            .filterNot(::isPublicObjectMethod)
+            .groupBy { it.name to it.parameterTypes }
+        if (contracts.size != 1) return null
+        val returnTypes = contracts.values.single().map { it.returnType }.distinct()
+        if (returnTypes.size > 1 && returnTypes.none { candidate ->
+                returnTypes.all { other -> isAssignableTo(candidate, other.name, mutableSetOf()) }
+            }) {
+            return null
+        }
+        return contracts.keys.single().second
+    }
+
+    private fun collectProjectAbstractMethods(
+        receiver: TypeRef,
+        visited: MutableSet<String>
+    ): List<FunctionalMethodSignature>? {
+        knownFunctionalMethod(receiver)?.let { return listOf(it) }
+        if (!visited.add(receiver.toString())) return emptyList()
+        val info = loadType(receiver.name) ?: return null
+        val declaration = info.declaration as? ClassOrInterfaceDeclaration ?: return null
+        if (!declaration.isInterface) return null
+        val substitutions = substitutions(info, receiver)
+        val direct = methods(info).filter { method ->
+            !method.isStatic && !method.isPrivate && !method.isDefault && !method.body.isPresent
+        }.map { method ->
+            FunctionalMethodSignature(
+                method.nameAsString,
+                method.parameters.map { parameter ->
+                    resolveType(parseType(parameter.typeAsString), info, substitutions) ?: return null
+                },
+                resolveType(parseType(method.typeAsString), info, substitutions) ?: return null
+            )
+        }
+        val inherited = resolvedSupers(info, substitutions).flatMap { superType ->
+            collectProjectAbstractMethods(superType, visited) ?: return null
+        }
+        return direct + inherited
+    }
+
+    private fun knownFunctionalMethod(type: TypeRef): FunctionalMethodSignature? {
+        val arguments = type.arguments
+        return when (type.name) {
+            "java.lang.Runnable" -> FunctionalMethodSignature("run", emptyList(), TypeRef("void"))
+            "java.util.concurrent.Callable" -> arguments.singleOrNull()?.let {
+                FunctionalMethodSignature("call", emptyList(), it)
+            }
+            "java.util.Comparator" -> arguments.singleOrNull()?.let {
+                FunctionalMethodSignature("compare", listOf(it, it), TypeRef("int"))
+            }
+            "java.util.function.Supplier" -> arguments.singleOrNull()?.let {
+                FunctionalMethodSignature("get", emptyList(), it)
+            }
+            "java.util.function.Consumer" -> arguments.singleOrNull()?.let {
+                FunctionalMethodSignature("accept", listOf(it), TypeRef("void"))
+            }
+            "java.util.function.Predicate" -> arguments.singleOrNull()?.let {
+                FunctionalMethodSignature("test", listOf(it), TypeRef("boolean"))
+            }
+            "java.util.function.Function" -> arguments.takeIf { it.size == 2 }?.let {
+                FunctionalMethodSignature("apply", listOf(it[0]), it[1])
+            }
+            "java.util.function.UnaryOperator" -> arguments.singleOrNull()?.let {
+                FunctionalMethodSignature("apply", listOf(it), it)
+            }
+            "java.util.function.BiConsumer" -> arguments.takeIf { it.size == 2 }?.let {
+                FunctionalMethodSignature("accept", it, TypeRef("void"))
+            }
+            "java.util.function.BiPredicate" -> arguments.takeIf { it.size == 2 }?.let {
+                FunctionalMethodSignature("test", it, TypeRef("boolean"))
+            }
+            "java.util.function.BiFunction" -> arguments.takeIf { it.size == 3 }?.let {
+                FunctionalMethodSignature("apply", it.take(2), it[2])
+            }
+            "java.util.function.BinaryOperator" -> arguments.singleOrNull()?.let {
+                FunctionalMethodSignature("apply", listOf(it, it), it)
+            }
+            else -> null
+        }
+    }
+
+    private fun isPublicObjectMethod(method: FunctionalMethodSignature): Boolean = when {
+        method.name == "equals" && method.parameterTypes == listOf(TypeRef("java.lang.Object")) -> true
+        method.name == "hashCode" && method.parameterTypes.isEmpty() -> true
+        method.name == "toString" && method.parameterTypes.isEmpty() -> true
+        else -> false
+    }
+
     private fun resolveField(receiver: TypeRef, name: String, visited: MutableSet<String>): TypeRef? {
         if (!visited.add(receiver.toString())) return null
         knownFields[receiver.name]?.get(name)?.let { field ->
@@ -812,10 +1287,19 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         }
         val info = loadType(receiver.name) ?: return null
         val substitutions = substitutions(info, receiver)
-        val fields = info.declaration.fields.flatMap { it.variables }.filter { it.nameAsString == name }
-        if (fields.size > 1) throw IllegalStateException("Ambiguous field '$name' on ${receiver.name}")
-        fields.singleOrNull()?.let { field ->
+        val matchingFields = fields(info).flatMap { it.variables }.filter { it.nameAsString == name }
+        if (matchingFields.size > 1) throw IllegalStateException("Ambiguous field '$name' on ${receiver.name}")
+        matchingFields.singleOrNull()?.let { field ->
             return resolveType(parseType(field.typeAsString), info, substitutions)
+        }
+        val recordComponents = (info.declaration as? RecordDeclaration)?.parameters
+            ?.filter { it.nameAsString == name }
+            .orEmpty()
+        if (recordComponents.size > 1) {
+            throw IllegalStateException("Ambiguous record component '$name' on ${receiver.name}")
+        }
+        recordComponents.singleOrNull()?.let { component ->
+            return resolveType(parseType(component.typeAsString), info, substitutions)
         }
         return exactSingle(
             resolvedSupers(info, substitutions).mapNotNull { resolveField(it, name, visited) },
@@ -823,8 +1307,67 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         )
     }
 
+    private fun exactFieldStaticness(
+        receiver: TypeRef,
+        name: String,
+        visited: MutableSet<String>
+    ): Boolean? {
+        val key = "${receiver.name}#$name"
+        if (!visited.add(key)) return null
+        val info = loadType(receiver.name) ?: return null
+        val direct = fields(info).filter { declaration ->
+            declaration.variables.any { it.nameAsString == name }
+        }
+        if (direct.size > 1) {
+            throw IllegalStateException("Ambiguous field '$name' on ${receiver.name}")
+        }
+        direct.singleOrNull()?.let { return it.isStatic }
+        return exactSingle(
+            resolvedSupers(info, substitutions(info, receiver)).mapNotNull { inherited ->
+                exactFieldStaticness(inherited, name, visited)
+            },
+            "field '$name' inherited by ${receiver.name}"
+        )
+    }
+
     private fun resolvedSupers(info: TypeInfo, substitutions: Map<String, TypeRef>): List<TypeRef> =
         info.directSupers.mapNotNull { raw -> resolveType(raw, info, substitutions) }
+
+    private fun resolveLexicalType(
+        raw: TypeRef,
+        use: Node,
+        owner: TypeInfo,
+        substitutions: Map<String, TypeRef>,
+        resolvingCallableBounds: MutableSet<String> = mutableSetOf()
+    ): TypeRef? {
+        var cursor: Node? = use
+        var callable: CallableDeclaration<*>? = null
+        while (cursor != null) {
+            if (cursor is CallableDeclaration<*>) {
+                callable = cursor
+                break
+            }
+            cursor = cursor.parentNode.orElse(null)
+        }
+        val exactCallable = callable
+        val callableParameter = exactCallable?.typeParameters?.singleOrNull { it.nameAsString == raw.name }
+        if (callableParameter != null) {
+            val callableNode = requireNotNull(exactCallable)
+            val key = "${System.identityHashCode(callableNode)}:${raw.name}"
+            if (!resolvingCallableBounds.add(key)) return null
+            val bound = callableParameter.typeBound.firstOrNull()?.asString() ?: "java.lang.Object"
+            val resolved = resolveLexicalType(
+                parseType(bound),
+                callableNode,
+                owner,
+                substitutions,
+                resolvingCallableBounds
+            )
+            resolvingCallableBounds.remove(key)
+            return resolved?.copy(arrayDepth = resolved.arrayDepth + raw.arrayDepth)
+        }
+        return resolveType(raw, owner, substitutions)
+    }
 
     private fun resolveType(
         raw: TypeRef,
@@ -869,7 +1412,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             if (name.substringBefore('.').firstOrNull()?.isLowerCase() == true) return name
             return null
         }
-        unit.findAll(ClassOrInterfaceDeclaration::class.java)
+        unit.findAll(TypeDeclaration::class.java)
             .filter { it.nameAsString == name }
             .mapNotNull { it.fullyQualifiedName.orElse(null) }
             .distinct()
@@ -937,7 +1480,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         return null
     }
 
-    private fun typeInfo(declaration: ClassOrInterfaceDeclaration): TypeInfo? {
+    private fun typeInfo(declaration: TypeDeclaration<*>): TypeInfo? {
         val qualified = declaration.fullyQualifiedName.orElse(null) ?: return null
         return typesByQualifiedName[qualified] ?: run {
             registerUnit(declaration.findCompilationUnit().orElse(null) ?: return null)
@@ -975,19 +1518,31 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     }
 
     private fun registerUnit(unit: CompilationUnit) {
-        unit.findAll(ClassOrInterfaceDeclaration::class.java).forEach { declaration ->
+        unit.findAll(TypeDeclaration::class.java).forEach { declaration ->
             val qualified = declaration.fullyQualifiedName.orElse(null) ?: return@forEach
             if (typesByQualifiedName.containsKey(qualified)) return@forEach
-            val bounds = declaration.typeParameters.mapNotNull { parameter ->
+            val typeParameters = when (declaration) {
+                is ClassOrInterfaceDeclaration -> declaration.typeParameters
+                is RecordDeclaration -> declaration.typeParameters
+                else -> emptyList()
+            }
+            val bounds = typeParameters.mapNotNull { parameter ->
                 parameter.typeBound.firstOrNull()?.let { parameter.nameAsString to parseType(it.asString()) }
             }.toMap()
+            val directSupers = when (declaration) {
+                is ClassOrInterfaceDeclaration -> declaration.extendedTypes + declaration.implementedTypes
+                is RecordDeclaration -> declaration.implementedTypes
+                is EnumDeclaration -> declaration.implementedTypes
+                is AnnotationDeclaration -> emptyList()
+                else -> emptyList()
+            }
             typesByQualifiedName[qualified] = TypeInfo(
                 qualifiedName = qualified,
                 unit = unit,
                 declaration = declaration,
-                typeParameters = declaration.typeParameters.map { it.nameAsString },
+                typeParameters = typeParameters.map { it.nameAsString },
                 typeParameterBounds = bounds,
-                directSupers = (declaration.extendedTypes + declaration.implementedTypes).map { parseType(it.asString()) }
+                directSupers = directSupers.map { parseType(it.asString()) }
             )
         }
     }
@@ -999,10 +1554,20 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     }
 
     companion object {
+        private data class ExternalMethodSignature(
+            val name: String,
+            val parameterTypes: List<String> = emptyList()
+        )
+
+        private fun externalMethod(name: String, vararg parameterTypes: String) =
+            ExternalMethodSignature(name, parameterTypes.toList())
+
         private val JAVA_IDENTIFIER = Regex("[A-Za-z_$][A-Za-z0-9_$]*")
         private val primitiveTypes = setOf("boolean", "byte", "char", "double", "float", "int", "long", "short", "void")
         private val knownExternalTypes = mapOf(
             "ItemStack" to "net.minecraft.world.item.ItemStack",
+            "FriendlyByteBuf" to "net.minecraft.network.FriendlyByteBuf",
+            "RegistryFriendlyByteBuf" to "net.minecraft.network.RegistryFriendlyByteBuf",
             "Player" to "net.minecraft.world.entity.player.Player",
             "AbstractContainerScreen" to "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen",
             "List" to "java.util.List",
@@ -1010,19 +1575,146 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             "Map" to "java.util.Map",
             "Optional" to "java.util.Optional"
         )
+        private val knownExternalAssignableTypes = mapOf(
+            "net.minecraft.world.level.Level" to setOf("net.minecraft.world.level.BlockGetter"),
+            "net.minecraft.server.level.ServerLevel" to setOf(
+                "net.minecraft.world.level.Level",
+                "net.minecraft.world.level.BlockGetter"
+            ),
+            "net.minecraft.world.entity.LivingEntity" to setOf("net.minecraft.world.entity.Entity"),
+            "net.minecraft.world.entity.Mob" to setOf(
+                "net.minecraft.world.entity.LivingEntity",
+                "net.minecraft.world.entity.Entity"
+            ),
+            "net.minecraft.world.entity.player.Player" to setOf(
+                "net.minecraft.world.entity.LivingEntity",
+                "net.minecraft.world.entity.Entity"
+            ),
+            "net.minecraft.server.level.ServerPlayer" to setOf(
+                "net.minecraft.world.entity.player.Player",
+                "net.minecraft.world.entity.LivingEntity",
+                "net.minecraft.world.entity.Entity"
+            ),
+            "net.minecraft.world.level.block.entity.HopperBlockEntity" to
+                setOf("net.minecraft.world.level.block.entity.BlockEntity"),
+            "net.minecraft.world.level.block.entity.BaseContainerBlockEntity" to
+                setOf("net.minecraft.world.level.block.entity.BlockEntity"),
+            "net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity" to setOf(
+                "net.minecraft.world.level.block.entity.BaseContainerBlockEntity",
+                "net.minecraft.world.level.block.entity.BlockEntity"
+            ),
+            "java.util.List" to setOf("java.util.Collection", "java.lang.Iterable"),
+            "java.util.Collection" to setOf("java.lang.Iterable")
+        )
+        // Flattened from the mapped Minecraft 1.21.1 and NeoForge 21.1 source
+        // hierarchy. A surface is closed only when it includes every inherited
+        // public or protected instance method, so absence is valid override proof.
+        private val knownClosedExternalMethodSurfaces = mapOf(
+            "net.minecraft.world.level.block.entity.BlockEntity" to setOf(
+                externalMethod("applyComponents", "net.minecraft.core.component.DataComponentMap", "net.minecraft.core.component.DataComponentPatch"),
+                externalMethod("applyComponentsFromItemStack", "net.minecraft.world.item.ItemStack"),
+                externalMethod("applyImplicitComponents", "net.minecraft.world.level.block.entity.BlockEntity.DataComponentInput"),
+                externalMethod("clearRemoved"),
+                externalMethod("clone"),
+                externalMethod("collectComponents"),
+                externalMethod("collectImplicitComponents", "net.minecraft.core.component.DataComponentMap.Builder"),
+                externalMethod("components"),
+                externalMethod("deserializeAttachments", "net.minecraft.core.HolderLookup.Provider", "net.minecraft.nbt.CompoundTag"),
+                externalMethod("equals", "java.lang.Object"),
+                externalMethod("fillCrashReportCategory", "net.minecraft.CrashReportCategory"),
+                externalMethod("finalize"),
+                externalMethod("getBlockPos"),
+                externalMethod("getBlockState"),
+                externalMethod("getClass"),
+                externalMethod("getData", "java.util.function.Supplier"),
+                externalMethod("getData", "net.neoforged.neoforge.attachment.AttachmentType"),
+                externalMethod("getExistingData", "java.util.function.Supplier"),
+                externalMethod("getExistingData", "net.neoforged.neoforge.attachment.AttachmentType"),
+                externalMethod("getExistingDataOrNull", "java.util.function.Supplier"),
+                externalMethod("getExistingDataOrNull", "net.neoforged.neoforge.attachment.AttachmentType"),
+                externalMethod("getLevel"),
+                externalMethod("getModelData"),
+                externalMethod("getPersistentData"),
+                externalMethod("getType"),
+                externalMethod("getUpdatePacket"),
+                externalMethod("getUpdateTag", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("handleUpdateTag", "net.minecraft.nbt.CompoundTag", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("hasAttachments"),
+                externalMethod("hasCustomOutlineRendering", "net.minecraft.world.entity.player.Player"),
+                externalMethod("hasData", "java.util.function.Supplier"),
+                externalMethod("hasData", "net.neoforged.neoforge.attachment.AttachmentType"),
+                externalMethod("hasLevel"),
+                externalMethod("hashCode"),
+                externalMethod("invalidateCapabilities"),
+                externalMethod("isRemoved"),
+                externalMethod("isValidBlockState", "net.minecraft.world.level.block.state.BlockState"),
+                externalMethod("loadAdditional", "net.minecraft.nbt.CompoundTag", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("loadCustomOnly", "net.minecraft.nbt.CompoundTag", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("loadWithComponents", "net.minecraft.nbt.CompoundTag", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("notify"),
+                externalMethod("notifyAll"),
+                externalMethod("onChunkUnloaded"),
+                externalMethod("onDataPacket", "net.minecraft.network.Connection", "net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("onLoad"),
+                externalMethod("onlyOpCanSetNbt"),
+                externalMethod("removeComponentsFromTag", "net.minecraft.nbt.CompoundTag"),
+                externalMethod("removeData", "java.util.function.Supplier"),
+                externalMethod("removeData", "net.neoforged.neoforge.attachment.AttachmentType"),
+                externalMethod("requestModelDataUpdate"),
+                externalMethod("saveAdditional", "net.minecraft.nbt.CompoundTag", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("saveCustomAndMetadata", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("saveCustomOnly", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("saveToItem", "net.minecraft.world.item.ItemStack", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("saveWithFullMetadata", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("saveWithId", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("saveWithoutMetadata", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("serializeAttachments", "net.minecraft.core.HolderLookup.Provider"),
+                externalMethod("setBlockState", "net.minecraft.world.level.block.state.BlockState"),
+                externalMethod("setChanged"),
+                externalMethod("setComponents", "net.minecraft.core.component.DataComponentMap"),
+                externalMethod("setData", "java.util.function.Supplier", "java.lang.Object"),
+                externalMethod("setData", "net.neoforged.neoforge.attachment.AttachmentType", "java.lang.Object"),
+                externalMethod("setLevel", "net.minecraft.world.level.Level"),
+                externalMethod("setRemoved"),
+                externalMethod("syncData", "java.util.function.Supplier"),
+                externalMethod("syncData", "net.neoforged.neoforge.attachment.AttachmentType"),
+                externalMethod("toString"),
+                externalMethod("triggerEvent", "int", "int"),
+                externalMethod("wait"),
+                externalMethod("wait", "long"),
+                externalMethod("wait", "long", "int")
+            )
+        )
         private val implicitJavaLangTypes = setOf(
             "Boolean", "Byte", "Character", "Class", "Comparable", "Double", "Enum", "Float", "Integer", "Long",
             "Number", "Object", "Short", "String", "Throwable", "Void"
         ).associateWith { "java.lang.$it" }
         private val knownFields = mapOf(
-            "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen" to mapOf("menu" to TypeRef("T"))
+            "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen" to mapOf("menu" to TypeRef("T")),
+            "net.minecraft.client.Minecraft" to mapOf(
+                "level" to TypeRef("net.minecraft.world.level.Level")
+            )
         )
         private val knownMethods = mapOf(
+            "net.minecraft.client.Minecraft" to mapOf(
+                ("getInstance" to 0) to TypeRef("net.minecraft.client.Minecraft")
+            ),
             "net.minecraft.world.entity.player.Player" to mapOf(
-                ("getMainHandItem" to 0) to TypeRef("net.minecraft.world.item.ItemStack")
+                ("getMainHandItem" to 0) to TypeRef("net.minecraft.world.item.ItemStack"),
+                ("getCommandSenderWorld" to 0) to TypeRef("net.minecraft.world.level.Level")
+            ),
+            "net.minecraft.world.level.storage.loot.LootParams.Builder" to mapOf(
+                ("getLevel" to 0) to TypeRef("net.minecraft.server.level.ServerLevel")
             ),
             "net.minecraft.nbt.CompoundTag" to mapOf(
-                ("getCompound" to 1) to TypeRef("net.minecraft.nbt.CompoundTag")
+                ("getCompound" to 1) to TypeRef("net.minecraft.nbt.CompoundTag"),
+                ("getList" to 2) to TypeRef("net.minecraft.nbt.ListTag")
+            ),
+            "net.minecraft.network.FriendlyByteBuf" to mapOf(
+                ("readNbt" to 0) to TypeRef("net.minecraft.nbt.CompoundTag")
+            ),
+            "net.minecraft.network.RegistryFriendlyByteBuf" to mapOf(
+                ("readNbt" to 0) to TypeRef("net.minecraft.nbt.CompoundTag")
             )
         )
 
@@ -1035,6 +1727,13 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             while (text.endsWith("[]")) {
                 text = text.removeSuffix("[]").trimEnd()
                 arrayDepth++
+            }
+            if (text == "?" || text.startsWith("? super ")) {
+                return TypeRef("java.lang.Object", arrayDepth = arrayDepth)
+            }
+            if (text.startsWith("? extends ")) {
+                val bound = parseType(text.removePrefix("? extends "))
+                return bound.copy(arrayDepth = bound.arrayDepth + arrayDepth)
             }
             val open = text.indexOf('<')
             if (open < 0) return TypeRef(text, arrayDepth = arrayDepth)

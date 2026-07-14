@@ -15,6 +15,52 @@ class BlockEntityProviderBindingMigrationTest {
     lateinit var tempDir: Path
 
     @Test
+    fun `legacy BlockEntity self serialization calls close through staged helper providers`() {
+        val file = javaFile(
+            "SyncedBlockEntity.java",
+            """
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public abstract class SyncedBlockEntity extends BlockEntity {
+                protected SyncedBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                public void readClient(CompoundTag tag) {
+                    load(tag);
+                }
+
+                public CompoundTag writeClient(CompoundTag tag) {
+                    saveAdditional(tag);
+                    return tag;
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        val readProvider = Regex(
+            """readClient\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(migrated)?.groupValues?.get(1)
+        val writeProvider = Regex(
+            """writeClient\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(migrated)?.groupValues?.get(1)
+        assertTrue(readProvider != null, migrated)
+        assertTrue(writeProvider != null, migrated)
+        assertTrue(migrated.contains("loadAdditional(tag, $readProvider);"), migrated)
+        assertTrue(migrated.contains("saveAdditional(tag, $writeProvider);"), migrated)
+    }
+
+    @Test
     fun `block entity super serialization calls preserve the exact provider parameter name`() {
         val file = javaFile(
             "ExactProviderBlockEntity.java",
@@ -95,6 +141,148 @@ class BlockEntityProviderBindingMigrationTest {
     }
 
     @Test
+    fun `block entity provider contract closes custom hooks lambda calls and override families before call migration`() {
+        val file = javaFile(
+            "DelegatingBlockEntity.java",
+            """
+            package com.example;
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            class Behaviour {
+                public void read(CompoundTag tag, boolean clientPacket) {
+                }
+            }
+
+            class SpecializedBehaviour extends Behaviour {
+                @Override
+                public void read(CompoundTag tag, boolean clientPacket) {
+                    super.read(tag, clientPacket);
+                }
+            }
+
+            public class DelegatingBlockEntity extends BlockEntity {
+                private List<Behaviour> behaviours;
+
+                public DelegatingBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                protected void read(CompoundTag tag, boolean clientPacket) {
+                    super.load(tag);
+                    behaviours.forEach(behaviour -> behaviour.read(tag, clientPacket));
+                }
+
+                @Override
+                public final void load(CompoundTag tag) {
+                    read(tag, false);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("protected final void loadAdditional(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
+        assertTrue(
+            Regex("""protected void read\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+), boolean clientPacket\)""")
+                .containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(
+            Regex("""public void read\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+, boolean clientPacket\)""")
+                .findAll(migrated).count() == 2,
+            migrated
+        )
+        assertFalse(migrated.contains("super.load(tag);"), migrated)
+        assertFalse(migrated.contains("behaviour.read(tag, clientPacket)"), migrated)
+        assertFalse(migrated.contains("super.read(tag, clientPacket)"), migrated)
+        assertTrue(Regex("""super\.loadAdditional\(tag, \w+\);""").containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""behaviour\.read\(tag, \w+, clientPacket\)""").containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""super\.read\(tag, \w+, clientPacket\)""").containsMatchIn(migrated), migrated)
+    }
+
+    @Test
+    fun `legacy block entity helper interfaces inherit exact provider demand from project and base calls`() {
+        val file = javaFile(
+            "SafeBlockEntity.java",
+            """
+            package com.example;
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            interface SafeWriter {
+                void writeSafe(CompoundTag tag);
+            }
+
+            class Behaviour {
+                ItemStack stack;
+                void write(CompoundTag tag, boolean clientPacket) {
+                    tag.put("Stack", stack.serializeNBT());
+                }
+                void writeSafe(CompoundTag tag) {
+                    write(tag, false);
+                }
+            }
+
+            public class SafeBlockEntity extends BlockEntity implements SafeWriter {
+                List<Behaviour> behaviours;
+
+                public SafeBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                @Override
+                public void writeSafe(CompoundTag tag) {
+                    super.saveAdditional(tag);
+                    behaviours.forEach(behaviour -> behaviour.writeSafe(tag));
+                }
+
+                public CompoundTag writeClient(CompoundTag tag) {
+                    super.saveAdditional(tag);
+                    return tag;
+                }
+
+                public void readClient(CompoundTag tag) {
+                    super.load(tag);
+                }
+
+                static void copy(Level level, SafeWriter writer, CompoundTag tag) {
+                    writer.writeSafe(tag);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}\n$migrated")
+        assertTrue(Regex("""void writeSafe\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+\)""")
+            .findAll(migrated).count() == 3, migrated)
+        assertTrue(Regex("""CompoundTag writeClient\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+\)""")
+            .containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""void readClient\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+\)""")
+            .containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""super\.saveAdditional\(tag, \w+\);""").findAll(migrated).count() == 2, migrated)
+        assertTrue(Regex("""super\.loadAdditional\(tag, \w+\);""").containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""behaviour\.writeSafe\(tag, \w+\)""").containsMatchIn(migrated), migrated)
+        assertTrue(migrated.contains("writer.writeSafe(tag, level.registryAccess())"), migrated)
+    }
+
+    @Test
     fun `minecraft client use in a sibling method is not registry provider evidence`() {
         val file = javaFile(
             "ClientImportIsNotEvidence.java",
@@ -120,7 +308,7 @@ class BlockEntityProviderBindingMigrationTest {
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertFalse(migrated.contains("Minecraft.getInstance().level.registryAccess()"), migrated)
         assertFalse(migrated.contains("Minecraft.getInstance().modporterRegistries"), migrated)
-        assertTrue(migrated.contains("void encode(CompoundTag tag, ItemStack stack, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("void encode(CompoundTag tag, HolderLookup.Provider registries, ItemStack stack)"), migrated)
         assertTrue(migrated.contains("stack.saveOptional(registries)"), migrated)
         assertFalse(migrated.contains("void render(HolderLookup.Provider"), migrated)
     }
@@ -182,10 +370,10 @@ class BlockEntityProviderBindingMigrationTest {
         val migrated = file.readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(migrated.contains("write(CompoundTag tag, net.minecraft.core.HolderLookup.Provider modporterRegistries, boolean clientPacket)"), migrated)
-        assertTrue(migrated.contains("stored.saveOptional(modporterRegistries)"), migrated)
-        assertTrue(migrated.contains("inventory.serializeNBT(modporterRegistries)"), migrated)
-        assertTrue(migrated.contains("inventory.deserializeNBT(modporterRegistries, tag.getCompound(\"Inventory\"))"), migrated)
+        assertTrue(migrated.contains("write(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket)"), migrated)
+        assertTrue(migrated.contains("stored.saveOptional(registries)"), migrated)
+        assertTrue(migrated.contains("inventory.serializeNBT(registries)"), migrated)
+        assertTrue(migrated.contains("inventory.deserializeNBT(registries, tag.getCompound(\"Inventory\"))"), migrated)
         assertFalse(migrated.contains("stored.serializeNBT()"), migrated)
     }
 

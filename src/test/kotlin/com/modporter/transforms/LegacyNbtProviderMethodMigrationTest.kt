@@ -14,26 +14,27 @@ class LegacyNbtProviderMethodMigrationTest {
     lateinit var tempDir: Path
 
     @Test
-    fun `migrates compound tag lifecycle declarations and internal forwarding as one family`() {
+    fun `propagates provider aware compound tag contracts through an override family`() {
         val source = tempDir.resolve("src/main/java/com/example").createDirectories()
         source.resolve("BaseData.java").writeText(
             """
             package com.example;
             import java.util.function.Consumer;
+            import net.minecraft.core.HolderLookup;
             import net.minecraft.nbt.CompoundTag;
             public class BaseData {
-                public void write(CompoundTag tag, boolean clientPacket) {
-                    forEach(value -> value.write(tag, clientPacket));
+                public void write(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket) {
+                    forEach(value -> value.write(tag, registries, clientPacket));
                 }
-                public void read(CompoundTag tag, boolean clientPacket) {
+                public void read(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket) {
                 }
-                public void writeSafe(CompoundTag tag) {
-                    write(tag, false);
+                public void writeSafe(CompoundTag tag, HolderLookup.Provider registries) {
+                    write(tag, registries, false);
                 }
-                public void writeClient(CompoundTag tag) {
+                public void writeClient(CompoundTag tag, HolderLookup.Provider registries) {
                     saveAdditional(tag);
                 }
-                public void readClient(CompoundTag tag) {
+                public void readClient(CompoundTag tag, HolderLookup.Provider registries) {
                     loadAdditional(tag);
                 }
                 void saveAdditional(CompoundTag tag) {
@@ -79,22 +80,22 @@ class LegacyNbtProviderMethodMigrationTest {
         val child = source.resolve("ChildData.java").readText()
 
         assertTrue(changes.all { it.ruleId == "struct-nbt-provider-method-family" })
-        assertTrue(base.contains("write(CompoundTag tag, net.minecraft.core.HolderLookup.Provider modporterRegistries, boolean clientPacket)"), base)
-        assertTrue(base.contains("writeSafe(CompoundTag tag, net.minecraft.core.HolderLookup.Provider modporterRegistries)"), base)
-        assertTrue(base.contains("write(tag, modporterRegistries, false);"), base)
-        assertTrue(base.contains("value.write(tag, modporterRegistries, clientPacket)"), base)
-        assertTrue(base.contains("writeClient(CompoundTag tag, net.minecraft.core.HolderLookup.Provider modporterRegistries)"), base)
-        assertTrue(child.contains("super.write(data, modporterRegistries, clientPacket);"), child)
-        assertTrue(child.contains("super.read(data, modporterRegistries, clientPacket);"), child)
-        assertTrue(child.contains("readClient(CompoundTag data, net.minecraft.core.HolderLookup.Provider modporterRegistries)"), child)
-        assertTrue(child.contains("super.readClient(data, modporterRegistries);"), child)
-        assertTrue(child.contains("writeClient(CompoundTag data, net.minecraft.core.HolderLookup.Provider modporterRegistries)"), child)
-        assertTrue(child.contains("super.writeClient(data, modporterRegistries);"), child)
+        assertTrue(base.contains("write(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket)"), base)
+        assertTrue(base.contains("writeSafe(CompoundTag tag, HolderLookup.Provider registries)"), base)
+        assertTrue(base.contains("write(tag, registries, false);"), base)
+        assertTrue(base.contains("value.write(tag, registries, clientPacket)"), base)
+        assertTrue(base.contains("writeClient(CompoundTag tag, HolderLookup.Provider registries)"), base)
+        assertTrue(child.contains("super.write(data, registries, clientPacket);"), child)
+        assertTrue(child.contains("super.read(data, registries, clientPacket);"), child)
+        assertTrue(child.contains("readClient(CompoundTag data, net.minecraft.core.HolderLookup.Provider registries)"), child)
+        assertTrue(child.contains("super.readClient(data, registries);"), child)
+        assertTrue(child.contains("writeClient(CompoundTag data, net.minecraft.core.HolderLookup.Provider registries)"), child)
+        assertTrue(child.contains("super.writeClient(data, registries);"), child)
         assertTrue(child.contains("\"write(CompoundTag, boolean)\""), child)
     }
 
     @Test
-    fun `propagates an existing provider aware parent signature to an old child override`() {
+    fun `propagates an arbitrary provider aware parent signature without method name rules`() {
         val source = tempDir.resolve("src/main/java/com/example").createDirectories()
         source.resolve("BaseData.java").writeText(
             """
@@ -102,7 +103,7 @@ class LegacyNbtProviderMethodMigrationTest {
             import net.minecraft.nbt.CompoundTag;
             import net.minecraft.core.HolderLookup;
             public class BaseData {
-                public void readClient(CompoundTag tag, HolderLookup.Provider exactProvider) {
+                public void hydrateSnapshot(CompoundTag tag, HolderLookup.Provider exactProvider, int revision) {
                 }
             }
             """.trimIndent()
@@ -113,8 +114,8 @@ class LegacyNbtProviderMethodMigrationTest {
             import net.minecraft.nbt.CompoundTag;
             public class ChildData extends BaseData {
                 @Override
-                public void readClient(CompoundTag tag) {
-                    super.readClient(tag);
+                public void hydrateSnapshot(CompoundTag tag, int revision) {
+                    super.hydrateSnapshot(tag, revision);
                 }
             }
             """.trimIndent()
@@ -123,8 +124,8 @@ class LegacyNbtProviderMethodMigrationTest {
         LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
         val child = source.resolve("ChildData.java").readText()
 
-        assertTrue(child.contains("readClient(CompoundTag tag, net.minecraft.core.HolderLookup.Provider modporterRegistries)"), child)
-        assertTrue(child.contains("super.readClient(tag, modporterRegistries);"), child)
+        assertTrue(child.contains("hydrateSnapshot(CompoundTag tag, net.minecraft.core.HolderLookup.Provider exactProvider, int revision)"), child)
+        assertTrue(child.contains("super.hydrateSnapshot(tag, exactProvider, revision);"), child)
     }
 
     @Test
@@ -178,7 +179,7 @@ class LegacyNbtProviderMethodMigrationTest {
         val migrated = source.resolve("DataFamily.java").readText()
 
         assertTrue(migrated.contains("Unrelated.write(tag, new Unrelated());"), migrated)
-        assertTrue(!migrated.contains("Unrelated.write(tag, modporterRegistries"), migrated)
+        assertTrue(!migrated.contains("HolderLookup.Provider"), migrated)
     }
 
     @Test

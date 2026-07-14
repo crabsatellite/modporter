@@ -7999,7 +7999,7 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
-    fun `item stack serialization calls without provider evidence do not inject fallbacks`() {
+    fun `item stack serialization without a provider source becomes an explicit provider boundary`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
         srcDir.resolve("UnprovenItemStackNbtSurface.java").writeText("""
@@ -8025,9 +8025,10 @@ bus.addListener(ActualListenerRegistry::register);
         val migrated = srcDir.resolve("UnprovenItemStackNbtSurface.java").readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(migrated.contains("ItemStack restored = ItemStack.of(tag.getCompound(\"Stack\"));"), migrated)
-        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items);"), migrated)
-        assertTrue(migrated.contains("tag.put(\"Stack\", stack.save(new CompoundTag()));"), migrated)
+        assertTrue(migrated.contains("migrate(CompoundTag tag, HolderLookup.Provider registries, ItemStack stack)"), migrated)
+        assertTrue(migrated.contains("ItemStack restored = ItemStack.parseOptional(registries, tag.getCompound(\"Stack\"));"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, registries);"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Stack\", stack.saveOptional(registries));"), migrated)
         assertFalse(migrated.contains("RegistryAccess.EMPTY"), migrated)
         assertFalse(migrated.contains("player.registryAccess()"), migrated)
     }
@@ -8898,7 +8899,7 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
-    fun `current method client level access supplies holder lookup provider for migrated load calls`() {
+    fun `earlier client level access does not replace explicit provider propagation`() {
         val dataDir = tempDir.resolve("src/main/java/com/example/data")
         val clientDir = tempDir.resolve("src/main/java/com/example/client")
         dataDir.createDirectories()
@@ -8947,7 +8948,9 @@ bus.addListener(ActualListenerRegistry::register);
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(data.contains("public static StackData load(CompoundTag tag, HolderLookup.Provider registries)"), data)
-        assertTrue(client.contains("StackData.load(tag, net.minecraft.client.Minecraft.getInstance().level.registryAccess())"), client)
+        assertTrue(client.contains("public void sync(CompoundTag tag, HolderLookup.Provider registries)"), client)
+        assertTrue(client.contains("StackData.load(tag, registries)"), client)
+        assertFalse(client.contains("Minecraft.getInstance().level.registryAccess()"), client)
         assertFalse(client.contains("RegistryAccess.EMPTY"), client)
     }
 
@@ -15465,6 +15468,30 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("this.handleUpdateTag(tag, lookupProvider);"))
         assertFalse(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);"))
         assertFalse(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);"))
+    }
+
+    @Test
+    fun `unresolved executable registry access empty fallback hard gates`() {
+        val projectDir = createFile("UnresolvedRegistryAccess.java", """
+            package com.example;
+
+            import net.minecraft.core.RegistryAccess;
+
+            public class UnresolvedRegistryAccess {
+                public Object registries() {
+                    return RegistryAccess.EMPTY;
+                }
+            }
+        """.trimIndent())
+        val file = projectDir.resolve("src/main/java/com/example/UnresolvedRegistryAccess.java")
+
+        val result = StructuralRefactorPass().apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot resolve exact HolderLookup.Provider for executable RegistryAccess.EMPTY") },
+            "errors=${result.errors}"
+        )
+        assertTrue(file.readText().contains("return RegistryAccess.EMPTY;"), file.readText())
     }
 
     @Test
@@ -41071,14 +41098,36 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("private void saveClientData(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
         assertTrue(migrated.contains("flask.toNBT(registries)"), migrated)
         assertTrue(migrated.contains("ItemStack toItem(HolderLookup.Provider registries)"), migrated)
-        assertTrue(migrated.contains("return flask.toItem(this.getLevel().registryAccess());"), migrated)
+        val dropProvider = Regex(
+            """public ItemStack drop\(Flask flask, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(migrated)?.groupValues?.get(1)
+        assertTrue(dropProvider != null, migrated)
+        assertTrue(migrated.contains("return flask.toItem($dropProvider);"), migrated)
         assertTrue(migrated.contains("return new PoolEntry(tag, registries);"), migrated)
+        assertTrue(migrated.contains("stack.saveOptional(registries);"), migrated)
         assertFalse(migrated.contains("new PoolEntry(tag, HolderLookup.Provider registries)"), migrated)
         assertFalse(migrated.contains("this.getLevel().registryAccess(), tag.getCompound(\"tank\")"), migrated)
-        assertTrue(other.contains("new ShelfBlockEntity.Flask(tag.getCompound(\"flask\"), this.getLevel().registryAccess())"), other)
-        assertTrue(other.contains("tag.put(\"flask\", flask.toNBT(this.getLevel().registryAccess()));"), other)
-        assertTrue(other.contains("return flask.toItem(this.getLevel().registryAccess());"), other)
+        val externalLoadProvider = Regex(
+            """loadExternal\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(other)?.groupValues?.get(1)
+        val externalSaveProvider = Regex(
+            """saveExternal\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(other)?.groupValues?.get(1)
+        val externalDropProvider = Regex(
+            """dropExternal\((?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(other)?.groupValues?.get(1)
+        assertTrue(externalLoadProvider != null, other)
+        assertTrue(externalSaveProvider != null, other)
+        assertTrue(externalDropProvider != null, other)
+        assertTrue(
+            other.contains("new ShelfBlockEntity.Flask(tag.getCompound(\"flask\"), $externalLoadProvider)"),
+            other
+        )
+        assertTrue(other.contains("tag.put(\"flask\", flask.toNBT($externalSaveProvider));"), other)
+        assertTrue(other.contains("return flask.toItem($externalDropProvider);"), other)
+        assertFalse(other.contains("getLevel().registryAccess()"), other)
         assertTrue(bloodPool.contains("return new BloodPoolEntity(tag, registries);"), bloodPool)
+        assertTrue(bloodPool.contains("stack.saveOptional(registries);"), bloodPool)
         assertFalse(bloodPool.contains("new BloodPoolEntity(tag, HolderLookup.Provider registries)"), bloodPool)
     }
 

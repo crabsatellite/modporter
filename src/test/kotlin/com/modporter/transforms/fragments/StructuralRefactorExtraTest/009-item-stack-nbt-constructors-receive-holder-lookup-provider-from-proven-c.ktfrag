@@ -96,7 +96,7 @@
     }
 
     @Test
-    fun `current method client level access supplies holder lookup provider for migrated load calls`() {
+    fun `earlier client level access does not replace explicit provider propagation`() {
         val dataDir = tempDir.resolve("src/main/java/com/example/data")
         val clientDir = tempDir.resolve("src/main/java/com/example/client")
         dataDir.createDirectories()
@@ -145,7 +145,9 @@
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(data.contains("public static StackData load(CompoundTag tag, HolderLookup.Provider registries)"), data)
-        assertTrue(client.contains("StackData.load(tag, net.minecraft.client.Minecraft.getInstance().level.registryAccess())"), client)
+        assertTrue(client.contains("public void sync(CompoundTag tag, HolderLookup.Provider registries)"), client)
+        assertTrue(client.contains("StackData.load(tag, registries)"), client)
+        assertFalse(client.contains("Minecraft.getInstance().level.registryAccess()"), client)
         assertFalse(client.contains("RegistryAccess.EMPTY"), client)
     }
 

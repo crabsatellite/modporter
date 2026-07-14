@@ -7,12 +7,15 @@ import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.StaticJavaParser
 import com.github.javaparser.ast.CompilationUnit
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
+import com.github.javaparser.ast.body.ConstructorDeclaration
 import com.github.javaparser.ast.body.FieldDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.body.Parameter
+import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.*
 import com.github.javaparser.ast.stmt.ExplicitConstructorInvocationStmt
+import com.github.javaparser.ast.stmt.IfStmt
 import com.github.javaparser.ast.stmt.ReturnStmt
 import com.github.javaparser.ast.type.ClassOrInterfaceType
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
@@ -37,6 +40,15 @@ private val STRUCTURAL_RESOURCE_JSON = Json {
 class StructuralRefactorPass : Pass {
     override val name = "Structural Refactor"
     override val order = 3
+
+    private data class ExactJavaMethodSurface(
+        val name: String,
+        val range: IntRange,
+        val parameters: List<Pair<String, String>>
+    )
+
+    private var exactJavaMethodSurfaceSource: String? = null
+    private var exactJavaMethodSurfaces: List<ExactJavaMethodSurface> = emptyList()
 
     override fun analyze(projectDir: Path): PassResult = processFiles(projectDir, dryRun = true)
     override fun apply(projectDir: Path): PassResult = processFiles(projectDir, dryRun = false)
@@ -553,10 +565,33 @@ class StructuralRefactorPass : Pass {
             errors.add("Common NeoForge 1.21 API migration error: ${e.message}")
         }
 
+        // Handle exact residual BlockEntity queries only after the broader
+        // source-relationship migration has consumed the shapes it owns.
+        try {
+            val queryChanges = ExactBlockEntityCapabilityQueryMigration(
+                projectDir.resolve("src/main/java"),
+                plannedLazyOptionalType = {
+                    detectRequiredGeneratedCompatPackage(
+                        projectDir,
+                        "exact BlockEntity capability query migration"
+                    ) + ".LazyOptional"
+                }
+            ).migrate(dryRun)
+            changes.addAll(queryChanges)
+        } catch (e: Exception) {
+            errors.add("Block entity capability query migration error: ${e.message}")
+        }
+
         try {
             changes.addAll(ExactFluidTankProviderCallMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Exact FluidTank provider call migration error: ${e.message}")
+        }
+
+        try {
+            changes.addAll(ExactExternalProviderCallMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Exact external provider call migration error: ${e.message}")
         }
 
         try {
@@ -2926,70 +2961,4 @@ public final class DistExecution {
             ruleId = "struct-packet-payload-context"
         ))
         return result
-    }
-
-    private fun cleanupLegacyPayloadContextReferences(
-        content: String,
-        info: PacketClassInfo,
-        changes: MutableList<Change>
-    ): String {
-        var result = content
-        val original = result
-        val firstMatch = Regex("""\b\w+\.get\(\)\.(?:getDirection|getSender|setPacketHandled)\b""")
-            .find(maskJavaCommentsAndLiterals(content))
-
-        result = replaceExecutableRegex(
-            result,
-            Regex("""(?m)^[ \t]*if\s*\(\s*!\s*\w+\.get\(\)\.getDirection\(\)\.getReceptionSide\(\)\.is(?:Server|Client)\(\)\s*\)\s*return;\s*\r?\n""")
-        ) { "" }
-        result = replaceExecutableRegex(
-            result,
-            Regex("""\b(\w+)\.get\(\)\.getSender\(\)""")
-        ) { match -> "${match.groupValues[1]}.player()" }
-        result = replaceExecutableRegex(
-            result,
-            Regex("""(?m)^[ \t]*\w+\.get\(\)\.setPacketHandled\(true\);\s*\r?\n""")
-        ) { "" }
-        result = removeImportIfPresent(result, "java.util.function.Supplier")
-
-        if (result != original) {
-            changes.add(Change(
-                file = info.file,
-                line = firstMatch?.let { lineNumberAt(content, it.range.first) } ?: 1,
-                description = "Remove legacy NetworkEvent.Context supplier calls after IPayloadContext migration",
-                before = "ctx.get().getDirection()/getSender()/setPacketHandled(true)",
-                after = "directional PayloadRegistrar registration + IPayloadContext.player()",
-                confidence = Confidence.HIGH,
-                ruleId = "struct-packet-payload-context-cleanup"
-            ))
-        }
-        return result
-    }
-
-    private fun migrateConfigResourceLocationListValidators(projectDir: Path, dryRun: Boolean): List<Change> {
-        val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return emptyList()
-        val changes = mutableListOf<Change>()
-
-        Files.walk(srcDir)
-            .filter { it.extension == "java" }
-            .forEach { javaFile ->
-                val original = javaFile.readText()
-                val modified = migrateConfigResourceLocationListValidatorSource(original)
-                if (modified == original) return@forEach
-                changes.add(Change(
-                    file = javaFile,
-                    line = 1,
-                    description = "Allow optional dependency item ids in config lists while filtering absent registry entries at runtime",
-                    before = "config validator requires BuiltInRegistries.ITEM.containsKey(ResourceLocation.parse(id))",
-                    after = "validator checks ResourceLocation syntax; runtime item stream filters loaded registry entries",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-config-resource-location-list-validator"
-                ))
-                if (!dryRun) {
-                    javaFile.writeText(modified)
-                }
-            }
-
-        return changes
     }

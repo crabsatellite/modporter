@@ -7,12 +7,15 @@ import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.StaticJavaParser
 import com.github.javaparser.ast.CompilationUnit
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
+import com.github.javaparser.ast.body.ConstructorDeclaration
 import com.github.javaparser.ast.body.FieldDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.body.Parameter
+import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.*
 import com.github.javaparser.ast.stmt.ExplicitConstructorInvocationStmt
+import com.github.javaparser.ast.stmt.IfStmt
 import com.github.javaparser.ast.stmt.ReturnStmt
 import com.github.javaparser.ast.type.ClassOrInterfaceType
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
@@ -37,6 +40,15 @@ private val STRUCTURAL_RESOURCE_JSON = Json {
 class StructuralRefactorPass : Pass {
     override val name = "Structural Refactor"
     override val order = 3
+
+    private data class ExactJavaMethodSurface(
+        val name: String,
+        val range: IntRange,
+        val parameters: List<Pair<String, String>>
+    )
+
+    private var exactJavaMethodSurfaceSource: String? = null
+    private var exactJavaMethodSurfaces: List<ExactJavaMethodSurface> = emptyList()
 
     override fun analyze(projectDir: Path): PassResult = processFiles(projectDir, dryRun = true)
     override fun apply(projectDir: Path): PassResult = processFiles(projectDir, dryRun = false)
@@ -553,10 +565,33 @@ class StructuralRefactorPass : Pass {
             errors.add("Common NeoForge 1.21 API migration error: ${e.message}")
         }
 
+        // Handle exact residual BlockEntity queries only after the broader
+        // source-relationship migration has consumed the shapes it owns.
+        try {
+            val queryChanges = ExactBlockEntityCapabilityQueryMigration(
+                projectDir.resolve("src/main/java"),
+                plannedLazyOptionalType = {
+                    detectRequiredGeneratedCompatPackage(
+                        projectDir,
+                        "exact BlockEntity capability query migration"
+                    ) + ".LazyOptional"
+                }
+            ).migrate(dryRun)
+            changes.addAll(queryChanges)
+        } catch (e: Exception) {
+            errors.add("Block entity capability query migration error: ${e.message}")
+        }
+
         try {
             changes.addAll(ExactFluidTankProviderCallMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Exact FluidTank provider call migration error: ${e.message}")
+        }
+
+        try {
+            changes.addAll(ExactExternalProviderCallMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Exact external provider call migration error: ${e.message}")
         }
 
         try {
@@ -11593,29 +11628,130 @@ public class DelegatingPackResources extends AbstractPackResources {
         val javaFiles = Files.walk(srcDir)
             .filter { it.extension == "java" }
             .toList()
+        val registryGraph = ExactBlockEntityRegistryGraph.build(srcDir)
+        val legacyBlockCapabilityGraph = ExactLegacyBlockCapabilityGraph.build(srcDir)
+        val lazyOptionalProviderResolver = ExactLegacyLazyOptionalProviderResolver(srcDir)
+        val legacySourceIndex = JavaProjectTypeIndex.build(srcDir)
+        changes += legacyBlockCapabilityGraph.migrateDeclarationsAndPredicates(dryRun)
 
         for (javaFile in javaFiles) {
             val original = javaFile.readText()
             if (!original.contains("getCapability") ||
-                !original.contains("Capabilities.") ||
                 !original.contains("LazyOptional") ||
                 original.contains("registerCapabilities(RegisterCapabilitiesEvent")
             ) {
                 continue
             }
 
-            val id = """[A-Za-z_$][\w$]*"""
-            val className = Regex("""\bclass\s+($id)\s+extends\s+(?:$id(?:\.$id)*\.)?(?:$id)?BlockEntity\b""")
-                .find(original)
-                ?.groupValues
-                ?.get(1)
-                ?: continue
-            val registryRef = blockEntityRegistryRefFromConstructors(original) ?: continue
-            val registryOwner = registryRef.substringBeforeLast('.')
-            val registryField = registryRef.substringAfterLast('.')
-            val getCapabilityMethod = javaDeclaredMethodText(original, "getCapability") ?: continue
+            val capabilityMethods = legacySourceIndex.unit(javaFile)
+                .findAll(MethodDeclaration::class.java)
+                .filter { method ->
+                    if (method.nameAsString != "getCapability") return@filter false
+                    val owner = exactEnclosingNamedClass(method)?.fullyQualifiedName?.orElse(null)
+                        ?: return@filter false
+                    legacySourceIndex.isTypeAssignableTo(
+                        owner,
+                        "net.minecraft.world.level.block.entity.BlockEntity"
+                    )
+                }
+            if (capabilityMethods.size > 1) {
+                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
+                errors.add(
+                    "Cannot migrate BlockEntity getCapability in $relative: multiple BlockEntity capability " +
+                        "methods in one source file require separate owner edits"
+                )
+                continue
+            }
+            val capabilityMethod = capabilityMethods.singleOrNull() ?: continue
+            val ownerDeclaration = exactEnclosingNamedClass(capabilityMethod)
+                ?: throw IllegalStateException("Cannot resolve getCapability owner in $javaFile")
+            val blockEntityType = ownerDeclaration.fullyQualifiedName.orElse(null)
+                ?: throw IllegalStateException("Cannot resolve getCapability owner type in $javaFile")
+            val className = ownerDeclaration.nameAsString
+            val getCapabilityMethod = capabilityMethod.toString()
             val capabilityTokens = legacyBlockEntityCapabilityTokens(getCapabilityMethod)
-            val providers = extractBlockEntityLegacyCapabilityProviders(getCapabilityMethod, original)
+            val externalContracts = legacyBlockCapabilityGraph.contractsUsedBy(
+                javaFile,
+                blockEntityType,
+                "getCapability"
+            )
+            val capabilityParameter = Regex(
+                """(?:Capability|[A-Za-z_$][\w$]*\.Capability)\s*<[^>]+>\s+([A-Za-z_$][\w$]*)"""
+            ).find(maskJavaCommentsAndLiterals(getCapabilityMethod))?.groupValues?.get(1)
+            val sideParameter = getCapabilityDirectionParameterName(getCapabilityMethod)
+            val exactLazyOptionalProvider = capabilityParameter?.let { parameterName ->
+                { returnExpression: String ->
+                    lazyOptionalProviderResolver.resolve(
+                        file = javaFile,
+                        ownerType = blockEntityType,
+                        methodName = "getCapability",
+                        returnExpression = returnExpression,
+                        capabilityParameter = parameterName,
+                        sideParameter = sideParameter
+                    )?.let(::LegacyCapabilityProvider)
+                }
+            }
+            val exactGuardedTailProvider = capabilityParameter?.let { parameterName ->
+                { contract: ExactLegacyBlockCapabilityGraph.PredicateContract ->
+                    lazyOptionalProviderResolver.resolveGuardedTail(
+                        file = javaFile,
+                        ownerType = blockEntityType,
+                        methodName = "getCapability",
+                        predicateMethod = contract.methodName,
+                        capabilityParameter = parameterName,
+                        sideParameter = sideParameter
+                    )
+                }
+            }
+            val exactInstanceExpression = { expression: String ->
+                lazyOptionalProviderResolver.rewriteInstanceExpression(
+                    file = javaFile,
+                    ownerType = blockEntityType,
+                    methodName = "getCapability",
+                    expressionText = expression,
+                    parameterRenames = mapOf(sideParameter to "side")
+                )
+            }
+            val graphRegistryRefs = registryGraph.referencesFor(blockEntityType)
+            val registryRefs = if (graphRegistryRefs.isNotEmpty()) {
+                graphRegistryRefs
+            } else {
+                registryGraph.referencesForAssignableTo(blockEntityType).ifEmpty {
+                    blockEntityRegistryRefFromConstructors(original)?.let { listOf("$it.get()") }.orEmpty()
+                }
+            }
+            if (registryRefs.isEmpty()) {
+                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
+                errors.add(
+                    "Cannot migrate BlockEntity getCapability in $relative: no exact BlockEntityType registry " +
+                        "reference for $blockEntityType"
+                )
+                continue
+            }
+            val externalProviders = extractExternalBlockEntityCapabilityProviders(
+                getCapabilityMethod,
+                original,
+                externalContracts,
+                exactLazyOptionalProvider,
+                exactGuardedTailProvider,
+                exactInstanceExpression
+            )
+            if (externalProviders.size != externalContracts.size) {
+                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
+                errors.add(
+                    "Cannot migrate BlockEntity getCapability in $relative: external block capability " +
+                        "predicate/provider branch is not structurally closed"
+                )
+                continue
+            }
+            val providers = (
+                extractBlockEntityLegacyCapabilityProviders(
+                    getCapabilityMethod,
+                    original,
+                    exactLazyOptionalProvider,
+                    exactInstanceExpression
+                ) + externalProviders
+                ).distinctBy { it.capabilityExpression }
             if (providers.isEmpty()) {
                 if (isNoOpLegacyBlockEntityCapabilityOverride(getCapabilityMethod, capabilityTokens)) {
                     var modified = original
@@ -11644,6 +11780,19 @@ public class DelegatingPackResources extends AbstractPackResources {
                 )
                 continue
             }
+            val unconsumedBranches = unconsumedLegacyCapabilityBranches(
+                getCapabilityMethod,
+                providers,
+                externalContracts
+            )
+            if (unconsumedBranches.isNotEmpty()) {
+                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
+                errors.add(
+                    "Cannot partially migrate BlockEntity getCapability in $relative: unproven predicate branches " +
+                        unconsumedBranches.joinToString("; ")
+                )
+                continue
+            }
             val migratedCapabilities = providers.map { it.capabilityExpression }.toSet()
             val unmigratedCapabilities = capabilityTokens.filterNot { it in migratedCapabilities }
             if (unmigratedCapabilities.isNotEmpty()) {
@@ -11662,10 +11811,15 @@ public class DelegatingPackResources extends AbstractPackResources {
             modified = removeLegacyCapabilityCacheState(modified, consumedFields, className)
             modified = cleanupLegacyCapabilityOverrideImports(modified)
             modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+            if (providers.any { it.capabilityExpression.startsWith("Capabilities.") }) {
+                modified = Regex(
+                    """(?m)^[ \t]*import\s+com\.modporter\.generated\.[\w.]+\.compat\.Capabilities;\s*\r?\n"""
+                ).replace(modified, "")
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.Capabilities")
+            }
 
             val registerMethod = renderBlockEntityCapabilityRegistrationMethod(
-                className = className,
-                registryRef = "$registryOwner.$registryField.get()",
+                registryRefs = registryRefs,
                 providers = providers
             )
             modified = insertBeforeLastClassBrace(modified, registerMethod)
@@ -11679,7 +11833,10 @@ public class DelegatingPackResources extends AbstractPackResources {
                     file = javaFile,
                     packageName = packageNameOf(modified),
                     className = className,
-                    preferredRegistryClassName = registryOwner.substringAfterLast('.')
+                    preferredRegistryClassName = registryRefs.first()
+                        .removeSuffix(".get()")
+                        .substringBeforeLast('.')
+                        .substringAfterLast('.')
                 )
             )
             changes.add(Change(
@@ -11745,6 +11902,59 @@ public class DelegatingPackResources extends AbstractPackResources {
             .distinct()
             .toList()
 
+    private fun unconsumedLegacyCapabilityBranches(
+        methodText: String,
+        providers: List<BlockEntityCapabilityProviderSpec>,
+        externalContracts: List<ExactLegacyBlockCapabilityGraph.PredicateContract>
+    ): List<String> {
+        val method = runCatching { StaticJavaParser.parseMethodDeclaration(methodText) }
+            .getOrElse { error ->
+                throw IllegalStateException("Cannot parse legacy getCapability method: ${error.message}", error)
+            }
+        val capabilityParameters = method.parameters.filter { parameter ->
+            parameter.type.asClassOrInterfaceType().nameAsString == "Capability"
+        }
+        if (capabilityParameters.size != 1) {
+            throw IllegalStateException(
+                "Expected one legacy Capability parameter in getCapability, found ${capabilityParameters.size}"
+            )
+        }
+        val capabilityName = capabilityParameters.single().nameAsString
+        val capabilityExpressions = providers.map { it.capabilityExpression }.toSet()
+        val externalPredicates = externalContracts.map { it.receiverName to it.methodName }.toSet()
+        return method.findAll(IfStmt::class.java).mapNotNull { branch ->
+            if (branch.thenStmt.findAll(ReturnStmt::class.java).isEmpty()) return@mapNotNull null
+            val comparisons = branch.condition.findAll(BinaryExpr::class.java).mapNotNull { comparison ->
+                when {
+                    comparison.left is NameExpr && comparison.left.asNameExpr().nameAsString == capabilityName ->
+                        comparison.right.toString()
+                    comparison.right is NameExpr && comparison.right.asNameExpr().nameAsString == capabilityName ->
+                        comparison.left.toString()
+                    else -> null
+                }
+            }
+            val predicateCalls = branch.condition.findAll(MethodCallExpr::class.java).mapNotNull { call ->
+                if (call.arguments.none { argument ->
+                        argument is NameExpr && argument.nameAsString == capabilityName
+                    }
+                ) {
+                    return@mapNotNull null
+                }
+                val receiver = when (val scope = call.scope.orElse(null)) {
+                    is NameExpr -> scope.nameAsString
+                    is FieldAccessExpr -> scope.nameAsString.takeIf { scope.scope is ThisExpr }
+                    else -> null
+                }
+                receiver?.let { it to call.nameAsString }
+            }
+            if (comparisons.isEmpty() && predicateCalls.isEmpty()) return@mapNotNull null
+            val unknownComparisons = comparisons.filterNot { it in capabilityExpressions }
+            val unknownPredicates = predicateCalls.filterNot { it in externalPredicates }
+            if (unknownComparisons.isEmpty() && unknownPredicates.isEmpty()) return@mapNotNull null
+            branch.condition.toString()
+        }.distinct()
+    }
+
     private fun isNoOpLegacyBlockEntityCapabilityOverride(methodText: String, capabilityTokens: List<String>): Boolean {
         if (capabilityTokens.isEmpty()) return false
         val executableMethod = maskJavaCommentsAndLiterals(methodText)
@@ -11763,7 +11973,9 @@ public class DelegatingPackResources extends AbstractPackResources {
 
     private fun extractBlockEntityLegacyCapabilityProviders(
         methodText: String,
-        source: String
+        source: String,
+        exactLazyOptionalProvider: ((String) -> LegacyCapabilityProvider?)? = null,
+        exactInstanceExpression: ((String) -> String?)? = null
     ): List<BlockEntityCapabilityProviderSpec> {
         val executableMethodText = maskJavaCommentsAndLiterals(methodText)
         val removedGuard = Regex("""!\s*(?:this\.)?isRemoved\s*\(\s*\)""").containsMatchIn(executableMethodText) ||
@@ -11775,13 +11987,14 @@ public class DelegatingPackResources extends AbstractPackResources {
                 val provider = extractBlockEntityCapabilityProviderExpression(
                     branchBody = block.body,
                     source = source,
-                    sideParameter = sideParameter
+                    sideParameter = sideParameter,
+                    exactLazyOptionalProvider = exactLazyOptionalProvider
                 ) ?: return@mapNotNull null
                 val providerGuard = blockEntityCapabilityProviderGuard(
                     condition = block.condition,
                     capabilityExpression = capability,
-                    sideParameter = sideParameter
-                )
+                    exactInstanceExpression = exactInstanceExpression
+                ) ?: return@mapNotNull null
                 val guards = (if (removedGuard) listOf("!blockEntity.isRemoved()") else emptyList()) + providerGuard
                 val guardedProvider = if (guards.isNotEmpty()) {
                     "(${guards.distinct().joinToString(" && ")}) ? ${provider.expression} : null"
@@ -11790,6 +12003,88 @@ public class DelegatingPackResources extends AbstractPackResources {
                 }
                 BlockEntityCapabilityProviderSpec(capability, guardedProvider, provider.consumedLazyOptionalFields)
             }
+    }
+
+    private fun extractExternalBlockEntityCapabilityProviders(
+        methodText: String,
+        source: String,
+        contracts: List<ExactLegacyBlockCapabilityGraph.PredicateContract>,
+        exactLazyOptionalProvider: ((String) -> LegacyCapabilityProvider?)? = null,
+        exactGuardedTailProvider: ((ExactLegacyBlockCapabilityGraph.PredicateContract) -> String?)? = null,
+        exactInstanceExpression: ((String) -> String?)? = null
+    ): List<BlockEntityCapabilityProviderSpec> {
+        if (contracts.isEmpty()) return emptyList()
+        val executableMethod = maskJavaCommentsAndLiterals(methodText)
+        val capabilityParameter = Regex(
+            """(?:Capability|[A-Za-z_$][\w$]*\.Capability)\s*<[^>]+>\s+([A-Za-z_$][\w$]*)"""
+        ).find(executableMethod)?.groupValues?.get(1) ?: return emptyList()
+        val id = """[A-Za-z_$][\w$]*"""
+        val sideParameter = getCapabilityDirectionParameterName(executableMethod)
+        return contracts.mapNotNull { contract ->
+            if (contract.providerStrategy == ExactLegacyBlockCapabilityGraph.ProviderStrategy.BRANCH_RETURN) {
+                exactGuardedTailProvider?.invoke(contract)?.let { provider ->
+                    return@mapNotNull BlockEntityCapabilityProviderSpec(
+                        capabilityExpression = contract.targetExpression,
+                        providerExpression = provider
+                    )
+                }
+            }
+            val receiverPrefix = contract.receiverName?.let { "(?:this\\.)?${Regex.escape(it)}\\." }
+                ?: "(?:this\\.)?"
+            val predicatePattern = Regex(
+                """$receiverPrefix${Regex.escape(contract.methodName)}\s*\(\s*${Regex.escape(capabilityParameter)}\s*\)"""
+            )
+            val block = findIfBlockContainingToken(
+                executableMethod,
+                contract.receiverName?.let { "$it.${contract.methodName}" } ?: "${contract.methodName}("
+            )
+                ?: return@mapNotNull null
+            if (!predicatePattern.containsMatchIn(block.condition) ||
+                Regex("""!\s*${predicatePattern.pattern}""").containsMatchIn(block.condition)
+            ) return@mapNotNull null
+            val guards = block.condition.split("&&")
+                .map { it.trim() }
+                .filter { it.isNotBlank() && !predicatePattern.containsMatchIn(it) }
+                .map { guard ->
+                    exactInstanceExpression?.invoke(guard) ?: return@mapNotNull null
+                }
+            val provider = when (contract.providerStrategy) {
+                ExactLegacyBlockCapabilityGraph.ProviderStrategy.RECEIVER_LAZY_OPTIONAL -> {
+                    val receiver = contract.receiverName ?: return@mapNotNull null
+                    if (!Regex(
+                            """(?m)^[ \t]*(?:private|protected|public)\s+(?:final\s+)?[^;=()]+\s+${Regex.escape(receiver)}\s*(?:=|;)"""
+                        ).containsMatchIn(maskJavaCommentsAndLiterals(source))
+                    ) {
+                        return@mapNotNull null
+                    }
+                    val providerMethod = Regex(
+                        """return\s+(?:this\.)?${Regex.escape(receiver)}\.($id)\s*\(\s*\)\s*;"""
+                    ).find(block.body)?.groupValues?.get(1) ?: return@mapNotNull null
+                    val typeWitness = when (contract.providerMethodTypeParameterCount) {
+                        0 -> "."
+                        1 -> ".<${contract.providerApiType ?: return@mapNotNull null}>"
+                        else -> return@mapNotNull null
+                    }
+                    LegacyCapabilityProvider("blockEntity.$receiver$typeWitness$providerMethod().orElse(null)")
+                }
+                ExactLegacyBlockCapabilityGraph.ProviderStrategy.BRANCH_RETURN ->
+                    extractBlockEntityCapabilityProviderExpression(
+                        branchBody = block.body,
+                        source = source,
+                        sideParameter = sideParameter,
+                        exactLazyOptionalProvider = exactLazyOptionalProvider
+                    ) ?: return@mapNotNull null
+            }
+            BlockEntityCapabilityProviderSpec(
+                capabilityExpression = contract.targetExpression,
+                providerExpression = if (guards.isEmpty()) {
+                    provider.expression
+                } else {
+                    "(${guards.joinToString(" && ")}) ? ${provider.expression} : null"
+                },
+                consumedLazyOptionalFields = provider.consumedLazyOptionalFields
+            )
+        }
     }
 
     private fun findIfBlockContainingToken(source: String, token: String): JavaIfBlock? {
@@ -11854,9 +12149,9 @@ public class DelegatingPackResources extends AbstractPackResources {
     private fun blockEntityCapabilityProviderGuard(
         condition: String,
         capabilityExpression: String,
-        sideParameter: String
-    ): List<String> {
-        return condition.split("&&")
+        exactInstanceExpression: ((String) -> String?)?
+    ): List<String>? {
+        val guards = condition.split("&&")
             .map { it.trim() }
             .filter { it.isNotEmpty() }
             .filterNot { part ->
@@ -11864,24 +12159,24 @@ public class DelegatingPackResources extends AbstractPackResources {
                     Regex("""\b(?:cap|capability)\b""").containsMatchIn(part) &&
                     part.contains("Capabilities.")
             }
-            .mapNotNull { part ->
-                var migrated = part
-                    .replace(Regex("""!\s*this\.remove\b"""), "!blockEntity.isRemoved()")
-                    .replace(Regex("""!\s*remove\b"""), "!blockEntity.isRemoved()")
-                    .replace(Regex("""this\.remove\b"""), "blockEntity.isRemoved()")
-                    .replace(Regex("""\bthis\.isRemoved\s*\(\s*\)"""), "blockEntity.isRemoved()")
-                if (sideParameter != "side") {
-                    migrated = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(migrated, "side")
+            .map { part ->
+                val removedGuard = when {
+                    Regex("""^!\s*(?:this\.)?remove$""").matches(part) -> "!blockEntity.isRemoved()"
+                    Regex("""^(?:this\.)?remove$""").matches(part) -> "blockEntity.isRemoved()"
+                    else -> null
                 }
-                migrated = migrated.replace("this.", "blockEntity.")
-                if (migrated.contains("Capabilities.")) null else migrated
+                val migrated = removedGuard ?: exactInstanceExpression?.invoke(part) ?: return null
+                if (migrated.contains("Capabilities.")) return null
+                migrated
             }
+        return guards
     }
 
     private fun extractBlockEntityCapabilityProviderExpression(
         branchBody: String,
         source: String,
-        sideParameter: String
+        sideParameter: String,
+        exactLazyOptionalProvider: ((String) -> LegacyCapabilityProvider?)? = null
     ): LegacyCapabilityProvider? {
         parseLegacyCapabilityReturnChain(branchBody, source, sideParameter)
             ?.let { return it }
@@ -11904,6 +12199,7 @@ public class DelegatingPackResources extends AbstractPackResources {
 
         val directReturn = Regex("""return\s+([^;]+);""").find(branchBody) ?: return null
         return legacyCapabilityReturnToProvider(directReturn.groupValues[1], branchBody, source)
+            ?: exactLazyOptionalProvider?.invoke(directReturn.groupValues[1])
     }
 
     private fun parseLegacyCapabilityReturnChain(
@@ -12118,16 +12414,17 @@ public class DelegatingPackResources extends AbstractPackResources {
     }
 
     private fun renderBlockEntityCapabilityRegistrationMethod(
-        className: String,
-        registryRef: String,
+        registryRefs: List<String>,
         providers: List<BlockEntityCapabilityProviderSpec>
     ): String {
-        val registrations = providers.joinToString("\n") { provider ->
+        val registrations = registryRefs.flatMap { registryRef ->
+            providers.map { provider -> registryRef to provider }
+        }.joinToString("\n") { (registryRef, provider) ->
             """
         event.registerBlockEntity(
                 ${provider.capabilityExpression},
                 $registryRef,
-                ($className blockEntity, net.minecraft.core.Direction side) -> ${provider.providerExpression});
+                (blockEntity, side) -> ${provider.providerExpression});
 """.trimEnd()
         }
         return """
@@ -14548,7 +14845,29 @@ $fields
 
     private fun migrateCommonNeoForge121Apis(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
         if (!dryRun) {
+            val initialInheritanceIndex = collectJavaInheritanceIndex(javaFiles)
+            javaFiles.forEach { javaFile ->
+                val source = javaFile.readText()
+                val migrated = migrateBlockEntitySerializationDeclarationSource(source, initialInheritanceIndex)
+                if (migrated != source) {
+                    javaFile.writeText(migrated)
+                    changes += Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Migrate BlockEntity serialization declarations before provider propagation",
+                        before = "legacy BlockEntity serialization declaration",
+                        after = "provider-aware NeoForge 1.21 declaration",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-blockentity-provider-contract"
+                    )
+                }
+            }
             changes.addAll(
                 LegacyNbtProviderMethodMigration().migrate(
                     projectDir,
@@ -14557,11 +14876,6 @@ $fields
                 )
             )
         }
-        val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return changes
-        val javaFiles = Files.walk(srcDir)
-            .filter { it.toString().endsWith(".java") }
-            .toList()
         val javaSourceTypes = collectJavaSourceTypes(javaFiles)
         val recordComponents = collectJavaRecordComponents(srcDir)
         val mapCodecConstantOwners = collectMapCodecConstantOwners(srcDir)
@@ -14597,6 +14911,7 @@ $fields
         val optionalCompoundRecipeTagOwners = collectLegacyOptionalCompoundRecipeTagOwners(javaFiles)
         val legacyCookingRecipeClasses = collectLegacyCookingRecipeClasses(javaFiles)
         val javaInheritanceIndex = collectJavaInheritanceIndex(javaFiles)
+        val javaProjectTypeIndex = JavaProjectTypeIndex.build(srcDir)
         val recipeImplementationClasses = collectJavaRecipeImplementationClasses(javaFiles, javaInheritanceIndex)
         val customRecipeInputTypes = collectCustomRecipeInputTypes(javaFiles)
         val inheritedRecipeStateAccessors = collectInheritedRecipeStateAccessors(javaFiles)
@@ -14622,8 +14937,16 @@ $fields
             inbtSerializableTypeFqns,
             javaInheritanceIndex
         )
-        val itemStackNbtMethods = collectItemStackNbtMethodsNeedingHolderLookup(javaFiles, javaInheritanceIndex) +
-            providerAwareNbtMethods
+        val providerAwareMethodShapes = providerAwareNbtMethods.mapTo(linkedSetOf()) { method ->
+            Triple(method.owner, method.methodName, method.parameterCount)
+        }
+        val itemStackNbtMethods = collectItemStackNbtMethodsNeedingHolderLookup(
+            javaFiles,
+            javaInheritanceIndex,
+            javaProjectTypeIndex
+        )
+            .filterNot { method -> Triple(method.owner, method.methodName, method.parameterCount) in providerAwareMethodShapes }
+            .toSet() + providerAwareNbtMethods
         val itemStackNbtConstructors = collectItemStackNbtConstructorsNeedingHolderLookup(javaFiles, itemStackNbtMethods, javaInheritanceIndex)
         val constructorFactoryMethods = collectHolderLookupConstructorFactoryMethods(javaFiles, itemStackNbtConstructors, javaInheritanceIndex)
         val savedDataHolderLookupMethods = collectSavedDataHolderLookupMethods(javaFiles, savedDataClassNames)
@@ -14641,6 +14964,49 @@ $fields
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
                 var text = original
+
+                val nbtSerializableMigrated = migrateINBTSerializableHolderLookupSource(
+                    text,
+                    inbtSerializableTypeFqns
+                )
+                if (nbtSerializableMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate INBTSerializable methods to HolderLookup.Provider signatures",
+                        before = "serializeNBT()/deserializeNBT(CompoundTag)",
+                        after = "serializeNBT(HolderLookup.Provider)/deserializeNBT(HolderLookup.Provider, CompoundTag)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-inbtserializable-holderlookup"
+                    ))
+                    text = nbtSerializableMigrated
+                }
+
+                val stagedProviderContracts = migrateProjectItemStackNbtMethods(
+                    migrateProjectItemStackNbtMethods(
+                        text,
+                        effectiveItemStackNbtMethods,
+                        javaInheritanceIndex,
+                        entityDataValueTypes,
+                        javaMethodReturnTypes
+                    ),
+                    effectiveItemStackNbtMethods,
+                    javaInheritanceIndex,
+                    entityDataValueTypes,
+                    javaMethodReturnTypes
+                )
+                if (stagedProviderContracts != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Stage provider-aware project NBT contracts before BlockEntity call migration",
+                        before = "legacy project NBT declaration or call",
+                        after = "provider-aware declaration and exact call",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-project-nbt-provider-contract-stage"
+                    ))
+                    text = stagedProviderContracts
+                }
 
                 val tickMigrated = migrateLegacyTickEventSource(text)
                 if (tickMigrated != text) {
@@ -14728,20 +15094,6 @@ $fields
                         ruleId = "struct-blockentity-custom-name-component"
                     ))
                     text = customNameSetterMigrated
-                }
-
-                val nbtSerializableMigrated = migrateINBTSerializableHolderLookupSource(text, inbtSerializableTypeFqns)
-                if (nbtSerializableMigrated != text) {
-                    changes.add(Change(
-                        file = javaFile,
-                        line = 0,
-                        description = "Migrate INBTSerializable methods to HolderLookup.Provider signatures",
-                        before = "serializeNBT()/deserializeNBT(CompoundTag)",
-                        after = "serializeNBT(HolderLookup.Provider)/deserializeNBT(HolderLookup.Provider, CompoundTag)",
-                        confidence = Confidence.HIGH,
-                        ruleId = "struct-inbtserializable-holderlookup"
-                    ))
-                    text = nbtSerializableMigrated
                 }
 
                 val transparentBlockMigrated = migrateTransparentBlockBeaconSource(text)
@@ -20230,6 +20582,98 @@ ${entries.joinToString(",\n")}
         return result
     }
 
+    private fun migrateBlockEntitySerializationDeclarationSource(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        if (!source.contains("saveAdditional") &&
+            !source.contains("loadAdditional") &&
+            !source.contains("getUpdateTag") &&
+            !source.contains("handleUpdateTag") &&
+            !source.contains("onDataPacket") &&
+            !Regex("""public\s+(?:final\s+)?void\s+load\s*\(""").containsMatchIn(source)
+        ) {
+            return source
+        }
+        if (collectJavaClassDeclarations(source).none {
+                javaClassExtendsAny(it, javaBlockEntityBaseTypes(), javaInheritanceIndex)
+            }
+        ) {
+            return source
+        }
+
+        var result = source
+        result = replaceExecutableRegex(
+            result,
+            Regex("""((?:public|protected)\s+(?:final\s+)?)void\s+saveAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        ) { match ->
+            val params = match.groupValues[2]
+            if (params.contains("HolderLookup.Provider")) {
+                match.value
+            } else {
+                val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
+                "${match.groupValues[1]}void saveAdditional($params, HolderLookup.Provider $providerName)"
+            }
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(protected\s+(?:final\s+)?)void\s+loadAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        ) { match ->
+            val params = match.groupValues[2]
+            if (params.contains("HolderLookup.Provider")) {
+                match.value
+            } else {
+                val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
+                "${match.groupValues[1]}void loadAdditional($params, HolderLookup.Provider $providerName)"
+            }
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(public\s+(?:final\s+)?)void\s+load\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        ) { match ->
+            if (!javaClassExtendsAny(
+                    enclosingJavaClassDeclaration(result, match.range.first),
+                    javaBlockEntityBaseTypes(),
+                    javaInheritanceIndex
+                )
+            ) {
+                match.value
+            } else {
+                val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
+                "${match.groupValues[1].replace("public", "protected")}void loadAdditional(${match.groupValues[2]}, HolderLookup.Provider $providerName)"
+            }
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""public\s+((?:@[A-Za-z0-9_.]+\s+)*)(?:net\.minecraft\.nbt\.)?CompoundTag\s+getUpdateTag\s*\(\s*\)""")
+        ) { match ->
+            val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
+            "public ${match.groupValues[1]}CompoundTag getUpdateTag(HolderLookup.Provider $providerName)"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""public\s+void\s+handleUpdateTag\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        ) { match ->
+            val params = match.groupValues[1]
+            if (params.contains("HolderLookup.Provider")) {
+                match.value
+            } else {
+                val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "lookupProvider")
+                "public void handleUpdateTag($params, HolderLookup.Provider $providerName)"
+            }
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex(
+                """public\s+void\s+onDataPacket\s*\(\s*([^,)]*(?:net\.minecraft\.network\.)?Connection\s+)(\w+)\s*,\s*([^,)]*(?:net\.minecraft\.network\.protocol\.game\.)?ClientboundBlockEntityDataPacket\s+)(\w+)\s*\)"""
+            )
+        ) { match ->
+            val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "lookupProvider")
+            "public void onDataPacket(${match.groupValues[1]}${match.groupValues[2]}, ${match.groupValues[3]}${match.groupValues[4]}, HolderLookup.Provider $providerName)"
+        }
+        return if (result == source) result else addImportIfMissing(result, "net.minecraft.core.HolderLookup")
+    }
+
     private fun migrateBlockEntitySerializationSource(
         source: String,
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
@@ -20311,11 +20755,11 @@ ${entries.joinToString(",\n")}
                     return@replaceExecutableRegex match.value
                 }
                 needsHolderLookup = true
-                val providerName = requiredHolderLookupProviderNameAt(
+                val providerName = exactHolderLookupProviderNameAtOrNull(
                     result,
                     match.range.first,
                     "BlockEntity super.load migration"
-                )
+                ) ?: return@replaceExecutableRegex match.value
                 "super.loadAdditional(${match.groupValues[1]}, $providerName);"
             }
 
@@ -20332,11 +20776,11 @@ ${entries.joinToString(",\n")}
                     return@replaceExecutableRegex match.value
                 }
                 needsHolderLookup = true
-                val providerName = requiredHolderLookupProviderNameAt(
+                val providerName = exactHolderLookupProviderNameAtOrNull(
                     result,
                     match.range.first,
                     "BlockEntity super.saveAdditional migration"
-                )
+                ) ?: return@replaceExecutableRegex match.value
                 "super.saveAdditional(${match.groupValues[1]}, $providerName);"
             }
 
@@ -31046,14 +31490,67 @@ ${indent}}"""
     }
 
     private fun holderLookupProviderNamesAt(source: String, offset: Int): Set<String> {
-        val method = javaMethodRangesIncludingDefault(source)
+        val method = exactJavaMethodAt(source, offset) ?: return emptySet()
+        return method.parameters.mapNotNull { (type, name) ->
+            name.takeIf {
+                type == "HolderLookup.Provider" ||
+                    type == "net.minecraft.core.HolderLookup.Provider"
+            }
+        }.toSet()
+    }
+
+    private fun exactJavaMethodAt(source: String, offset: Int): ExactJavaMethodSurface? =
+        exactJavaMethodSurfaces(source)
             .filter { offset in it.range }
             .minByOrNull { it.range.last - it.range.first }
-            ?: return emptySet()
-        val parameters = javaMethodParameterText(method.header)
-            ?.let(::splitTopLevelJavaArgs)
-            ?: return emptySet()
-        return holderLookupProviderNamesFromParameters(parameters).toSet()
+
+    private fun exactJavaMethodSurfaces(source: String): List<ExactJavaMethodSurface> {
+        if (exactJavaMethodSurfaceSource == source) return exactJavaMethodSurfaces
+        val parser = JavaParser(
+            ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+        )
+        val parsed = parser.parse(source)
+        val unit = parsed.result.orElseThrow {
+            IllegalStateException(
+                "Cannot resolve exact Java method structure for provider binding: ${parseProblems(parsed)}"
+            )
+        }
+        val lineOffsets = buildList {
+            add(0)
+            source.forEachIndexed { index, character -> if (character == '\n') add(index + 1) }
+        }
+        fun offset(position: com.github.javaparser.Position): Int =
+            lineOffsets.getOrElse(position.line - 1) {
+                throw IllegalStateException("Invalid JavaParser line ${position.line} in provider binding source")
+            } + position.column - 1
+        fun surface(
+            name: String,
+            range: com.github.javaparser.Range,
+            parameters: List<Parameter>
+        ): ExactJavaMethodSurface {
+            val start = offset(range.begin)
+            val endInclusive = offset(range.end)
+            if (start !in source.indices || endInclusive !in source.indices || start > endInclusive) {
+                throw IllegalStateException(
+                    "Invalid exact Java callable range for $name: $start..$endInclusive"
+                )
+            }
+            return ExactJavaMethodSurface(
+                name,
+                start..endInclusive,
+                parameters.map { parameter -> parameter.typeAsString to parameter.nameAsString }
+            )
+        }
+        val surfaces = unit.findAll(MethodDeclaration::class.java).mapNotNull { method ->
+            val range = method.range.orElse(null) ?: return@mapNotNull null
+            surface(method.nameAsString, range, method.parameters.toList())
+        } + unit.findAll(ConstructorDeclaration::class.java).mapNotNull { constructor ->
+            val range = constructor.range.orElse(null) ?: return@mapNotNull null
+            surface(constructor.nameAsString, range, constructor.parameters.toList())
+        }
+        exactJavaMethodSurfaceSource = source
+        exactJavaMethodSurfaces = surfaces
+        return surfaces
     }
 
     private fun holderLookupProviderNamesFromParameters(parameters: List<String>): List<String> {
@@ -31090,6 +31587,25 @@ ${indent}}"""
         return entitySelfRegistryAccessExpression(declaration, javaInheritanceIndex)
     }
 
+    private fun strictRegistryAccessExpressionAt(
+        source: String,
+        offset: Int,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String? {
+        val parameters = currentMethodParametersBeforeOffset(source, offset)
+        registryAccessFromParameters(parameters, javaInheritanceIndex)?.let { return it }
+        sourceProvenLocalRegistryAccessExpressionAt(source, offset)?.let { return it }
+        sourceProvenClientMinecraftRegistryAccessExpressionAt(source, offset)?.let { return it }
+        if (!isInsideInstanceJavaMethod(source, offset)) return null
+        val declaration = enclosingJavaClassDeclaration(source, offset) ?: return null
+        declaration.name
+            .let { javaInheritanceIndex.inheritedRegistryAccessField(it) }
+            ?.let { return "$it.registryAccess()" }
+        return "this.registryAccess()".takeIf {
+            javaClassExtendsAny(declaration, javaEntityBaseTypes(), javaInheritanceIndex)
+        }
+    }
+
     private fun sourceProvenLocalRegistryAccessExpressionAt(source: String, offset: Int): String? {
         val methodRange = enclosingMethodRange(source, offset) ?: return null
         val methodText = source.substring(methodRange)
@@ -31124,14 +31640,27 @@ ${indent}}"""
     }
 
     private fun requiredHolderLookupProviderNameAt(source: String, offset: Int, context: String): String {
+        return exactHolderLookupProviderNameAtOrNull(source, offset, context)
+            ?: throw IllegalStateException(
+                "$context in '${enclosingJavaMethodNameAt(source, offset) ?: "<unresolved>"}' requires one " +
+                    "HolderLookup.Provider parameter; found 0"
+            )
+    }
+
+    private fun exactHolderLookupProviderNameAtOrNull(
+        source: String,
+        offset: Int,
+        context: String
+    ): String? {
         val providers = holderLookupProviderNamesAt(source, offset)
-        if (providers.size != 1) {
+        if (providers.size > 1) {
+            val method = enclosingJavaMethodNameAt(source, offset) ?: "<unresolved>"
             throw IllegalStateException(
-                "$context requires exactly one HolderLookup.Provider parameter in the enclosing Java method; " +
+                "$context in '$method' has ambiguous HolderLookup.Provider parameters; " +
                     "found ${providers.size}"
             )
         }
-        return providers.single()
+        return providers.singleOrNull()
     }
 
     private fun uniqueHolderLookupProviderNameForMethodAt(
@@ -31151,10 +31680,7 @@ ${indent}}"""
     }
 
     private fun enclosingJavaMethodNameAt(source: String, offset: Int): String? =
-        javaMethodRangesIncludingDefault(source)
-            .filter { offset in it.range }
-            .minByOrNull { it.range.last - it.range.first }
-            ?.name
+        exactJavaMethodAt(source, offset)?.name
 
     private fun migrateLegacyDamageBonusMobTypeCalls(source: String): String {
         if (!source.contains("EnchantmentHelper.getDamageBonus(") || !source.contains(".getMobType()")) return source
@@ -33726,7 +34252,9 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         val owner: String,
         val methodName: String,
         val parameterCount: Int? = null,
-        val providerParameterIndex: Int? = null
+        val providerParameterIndex: Int? = null,
+        val legacyParameterTypes: List<String>? = null,
+        val requiresTypedCallResolution: Boolean = false
     )
 
     private data class HolderLookupNbtConstructor(
@@ -33755,6 +34283,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 (method.parameterCount == null || method.parameterCount == legacyArgumentCount)
         }
         if (matches.isEmpty()) return null
+        if (matches.any { it.requiresTypedCallResolution }) return null
         val providerIndices = matches.map { method ->
             method.providerParameterIndex ?: legacyArgumentCount
         }.distinct()
@@ -33773,6 +34302,37 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         }
         return matches.first()
     }
+
+    private fun resolveHolderLookupNbtDeclarationContract(
+        methods: Collection<HolderLookupNbtMethod>,
+        owner: String?,
+        methodName: String,
+        legacyParameters: List<String>
+    ): HolderLookupNbtMethod? {
+        if (owner == null) return null
+        val declaredTypes = legacyParameters.map { parameter ->
+            parseJavaParameter(parameter)?.first?.let(::normalizeJavaTypeForContract) ?: return null
+        }
+        val matches = methods.filter { method ->
+            method.owner == owner &&
+                method.methodName == methodName &&
+                method.parameterCount == legacyParameters.size &&
+                method.legacyParameterTypes?.map(::normalizeJavaTypeForContract) == declaredTypes
+        }
+        if (matches.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous typed HolderLookup.Provider declaration contract for " +
+                    "$owner.$methodName$declaredTypes"
+            )
+        }
+        return matches.singleOrNull()
+    }
+
+    private fun normalizeJavaTypeForContract(type: String): String =
+        type.replace(Regex("""@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*"""), "")
+            .replace(Regex("""\bfinal\s+"""), "")
+            .replace(Regex("""\s+"""), "")
+            .replace(Regex("""(?:[a-z_$][\w$]*\.)+([A-Z_$][\w$]*)"""), "${'$'}1")
 
     private fun insertHolderLookupProviderArgument(
         arguments: List<String>,
@@ -33852,16 +34412,30 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
 
     private fun collectItemStackNbtMethodsNeedingHolderLookup(
         javaFiles: List<Path>,
-        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY,
+        javaProjectTypeIndex: JavaProjectTypeIndex
     ): Set<HolderLookupNbtMethod> {
+        data class ConstructorKey(
+            val ownerQualified: String,
+            val parameterTypes: List<String>
+        )
         data class Candidate(
             val owner: String,
+            val ownerQualified: String,
             val methodName: String,
             val parameterCount: Int,
+            val parameterTypes: List<String>?,
             val header: String,
             val source: String,
             val range: IntRange,
-            val directItemStack: Boolean
+            val declaration: MethodDeclaration,
+            val directProviderDemand: Boolean,
+            val providerIndexHint: Int?
+        )
+        data class ProviderAwareTarget(
+            val ownerQualified: String,
+            val methodName: String,
+            val legacyParameterTypes: List<String>
         )
         val candidates = mutableListOf<Candidate>()
         val projectSerializableTypeFqns = collectProjectINBTSerializableTypes(javaFiles)
@@ -33869,36 +34443,221 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             collectEntityCapabilityValueTypes(javaFiles),
             collectEntityAttachmentValueTypes(javaFiles)
         )
-        for (javaFile in javaFiles) {
+        val providerDemandingConstructors = javaFiles.flatMap { javaFile ->
             val source = runCatching { javaFile.readText() }.getOrDefault("")
-            if (!source.contains("CompoundTag")) continue
-            val executableCode = maskJavaCommentsAndLiterals(source)
-            val typeBlocks = javaTypeBlocks(source, executableCode)
-            if (typeBlocks.isEmpty()) continue
+            if (!source.contains("CompoundTag")) return@flatMap emptyList()
             val classDeclarationsByName = collectJavaClassDeclarations(source).associateBy { it.name }
             val itemStackNames = collectItemStackValueNames(source)
             val itemStackCollectionNames = collectItemStackCollectionNames(source)
             val itemStackHandlerNames = collectItemStackHandlerValueNames(source)
             val fluidTankNames = collectFluidTankValueNames(source)
-            for (method in javaMethodRangesIncludingDefault(source)) {
-                if (method.header.contains("HolderLookup.Provider") ||
-                    method.header.contains("net.minecraft.core.HolderLookup.Provider")
+            javaProjectTypeIndex.unit(javaFile).findAll(ConstructorDeclaration::class.java).mapNotNull constructors@{ constructor ->
+                val owner = exactEnclosingNamedClass(constructor) ?: return@constructors null
+                val ownerQualified = owner.fullyQualifiedName.orElse(null) ?: return@constructors null
+                val parameterTypes = constructor.parameters.map { parameter ->
+                    javaProjectTypeIndex.declaredType(parameter.type, constructor) ?: return@constructors null
+                }
+                val directlyNeedsProvider = methodTextNeedsHolderLookupProvider(
+                    constructor.toString(),
+                    itemStackNames,
+                    itemStackCollectionNames,
+                    itemStackHandlerNames,
+                    fluidTankNames,
+                    classDeclarationsByName[owner.nameAsString]?.let {
+                        javaClassExtendsAny(it, setOf("ItemStackHandler"), javaInheritanceIndex)
+                    } == true
+                )
+                ConstructorKey(ownerQualified, parameterTypes).takeIf { directlyNeedsProvider }
+            }
+        }.toSet()
+
+        fun exactProviderDemandingConstructor(call: ObjectCreationExpr): ConstructorKey? {
+            val ownerQualified = javaProjectTypeIndex.expressionType(call, call) ?: return null
+            val matches = providerDemandingConstructors.filter { constructor ->
+                constructor.ownerQualified == ownerQualified &&
+                    call.arguments.size == constructor.parameterTypes.size &&
+                    call.arguments.zip(constructor.parameterTypes).all { (argument, expectedType) ->
+                        javaProjectTypeIndex.isExpressionAssignableTo(argument, call, expectedType)
+                    }
+            }
+            val mostSpecific = matches.filter { candidate ->
+                matches.none { other ->
+                    other != candidate && other.parameterTypes.zip(candidate.parameterTypes).all { (actual, expected) ->
+                        javaProjectTypeIndex.isTypeAssignableTo(actual, expected)
+                    }
+                }
+            }
+            if (mostSpecific.size > 1) {
+                throw IllegalStateException(
+                    "Ambiguous exact provider-demanding constructor '$call': $mostSpecific"
+                )
+            }
+            return mostSpecific.singleOrNull()
+        }
+        val providerAwareTargets = javaFiles.flatMap { javaFile ->
+            javaProjectTypeIndex.unit(javaFile).findAll(MethodDeclaration::class.java).mapNotNull targets@{ method ->
+                val owner = exactEnclosingNamedClass(method)?.fullyQualifiedName?.orElse(null) ?: return@targets null
+                val parameterTypes = method.parameters.map { parameter ->
+                    javaProjectTypeIndex.declaredType(parameter.type, method) ?: return@targets null
+                }
+                val providerIndexes = parameterTypes.mapIndexedNotNull { index, type ->
+                    index.takeIf { type == "net.minecraft.core.HolderLookup.Provider" }
+                }
+                if (providerIndexes.size != 1) return@targets null
+                val legacyTypes = parameterTypes.filterIndexed { index, _ -> index != providerIndexes.single() }
+                val returnType = javaProjectTypeIndex.declaredType(method.type, method)
+                if ("net.minecraft.nbt.CompoundTag" !in legacyTypes &&
+                    returnType != "net.minecraft.nbt.CompoundTag"
+                ) {
+                    return@targets null
+                }
+                ProviderAwareTarget(owner, method.nameAsString, legacyTypes)
+            }
+        }
+
+        fun isExactProviderAwareProjectCall(call: MethodCallExpr): Boolean {
+            val receiverType = javaProjectTypeIndex.methodCallReceiverType(call) ?: return false
+            val matches = providerAwareTargets.filter { target ->
+                target.methodName == call.nameAsString &&
+                    target.legacyParameterTypes.size == call.arguments.size &&
+                    javaProjectTypeIndex.isTypeAssignableTo(receiverType, target.ownerQualified) &&
+                    javaProjectTypeIndex.argumentsMatchTypes(call, target.legacyParameterTypes)
+            }
+            val mostSpecific = matches.filter { target ->
+                matches.none { other ->
+                    other != target && javaProjectTypeIndex.isTypeAssignableTo(
+                        other.ownerQualified,
+                        target.ownerQualified
+                    )
+                }
+            }
+            if (mostSpecific.size > 1) {
+                throw IllegalStateException("Ambiguous exact provider-aware project call '$call': $mostSpecific")
+            }
+            return mostSpecific.size == 1
+        }
+
+        fun isExactLegacyBlockEntityProviderCall(call: MethodCallExpr): Boolean {
+            val receiverType = javaProjectTypeIndex.methodCallReceiverType(call) ?: return false
+            if (!javaProjectTypeIndex.isTypeAssignableTo(
+                    receiverType,
+                    "net.minecraft.world.level.block.entity.BlockEntity"
+                )
+            ) {
+                return false
+            }
+            return when (call.nameAsString) {
+                "saveAdditional", "load", "loadAdditional", "handleUpdateTag" ->
+                    call.arguments.size == 1 && javaProjectTypeIndex.isExpressionAssignableTo(
+                        call.arguments.single(),
+                        call,
+                        "net.minecraft.nbt.CompoundTag"
+                    )
+                "getUpdateTag", "saveWithFullMetadata", "saveWithoutMetadata", "saveCustomOnly" ->
+                    call.arguments.isEmpty()
+                "onDataPacket" -> call.arguments.size == 2 &&
+                    javaProjectTypeIndex.isExpressionAssignableTo(
+                        call.arguments[0],
+                        call,
+                        "net.minecraft.network.Connection"
+                    ) &&
+                    javaProjectTypeIndex.isExpressionAssignableTo(
+                        call.arguments[1],
+                        call,
+                        "net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket"
+                    )
+                else -> false
+            }
+        }
+
+        for (javaFile in javaFiles) {
+            val source = runCatching { javaFile.readText() }.getOrDefault("")
+            if (!source.contains("CompoundTag")) continue
+            val classDeclarationsByName = collectJavaClassDeclarations(source).associateBy { it.name }
+            val itemStackNames = collectItemStackValueNames(source)
+            val itemStackCollectionNames = collectItemStackCollectionNames(source)
+            val itemStackHandlerNames = collectItemStackHandlerValueNames(source)
+            val fluidTankNames = collectFluidTankValueNames(source)
+            val lineOffsets = buildList {
+                add(0)
+                source.forEachIndexed { index, character -> if (character == '\n') add(index + 1) }
+            }
+            fun offset(position: com.github.javaparser.Position): Int =
+                lineOffsets.getOrElse(position.line - 1) {
+                    throw IllegalStateException("Invalid JavaParser line ${position.line} in $javaFile")
+                } + position.column - 1
+            for (method in javaProjectTypeIndex.unit(javaFile).findAll(MethodDeclaration::class.java)) {
+                var ownerNode: com.github.javaparser.ast.Node? = method.parentNode.orElse(null)
+                var ownerDeclaration: TypeDeclaration<*>? = null
+                while (ownerNode != null) {
+                    if (ownerNode is ObjectCreationExpr) break
+                    if (ownerNode is TypeDeclaration<*>) {
+                        ownerDeclaration = ownerNode
+                        break
+                    }
+                    ownerNode = ownerNode.parentNode.orElse(null)
+                }
+                val owner = ownerDeclaration ?: continue
+                val ownerQualified = owner.fullyQualifiedName.orElse(null) ?: continue
+                if (method.parameters.any { parameter ->
+                        javaProjectTypeIndex.declaredType(parameter.type, method) == "net.minecraft.core.HolderLookup.Provider"
+                    }
                 ) continue
-                val owner = typeBlocks.lastOrNull { method.range.first in it.bodyStart..it.end } ?: continue
-                val methodText = source.substring(method.range)
-                val directItemStack = !method.header.contains("@Override") &&
-                    methodTextNeedsHolderLookupProvider(
+                val nodeRange = method.range.orElse(null) ?: continue
+                val start = offset(nodeRange.begin)
+                val endExclusive = offset(nodeRange.end) + 1
+                if (start !in source.indices || endExclusive !in 1..source.length || start >= endExclusive) {
+                    throw IllegalStateException("Invalid method source range for $ownerQualified.${method.nameAsString} in $javaFile")
+                }
+                val methodRange = start until endExclusive
+                val methodText = source.substring(methodRange)
+                val headerEnd = method.body.flatMap { it.range }.map { range -> offset(range.begin) }.orElse(endExclusive)
+                val header = source.substring(start, headerEnd.coerceIn(start, endExclusive))
+                val parameterTypes = method.parameters.map { parameter ->
+                    javaProjectTypeIndex.declaredType(parameter.type, method) ?: return@map null
+                }.takeIf { types -> types.none { it == null } }?.filterNotNull()
+                val directNbtProviderDemand = methodTextNeedsHolderLookupProvider(
                         methodText,
                         itemStackNames,
                         itemStackCollectionNames,
                         itemStackHandlerNames,
                         fluidTankNames,
-                        classDeclarationsByName[owner.name]?.let {
+                        classDeclarationsByName[owner.nameAsString]?.let {
                             javaClassExtendsAny(it, setOf("ItemStackHandler"), javaInheritanceIndex)
                         } == true
-                    ) &&
-                    registryAccessExpressionAt(source, method.range.first, javaInheritanceIndex) == null
-                candidates += Candidate(owner.name, method.name, javaMethodParameterCount(method.header), method.header, source, method.range, directItemStack)
+                    )
+                val directMethodCallProviderDemand = method.findAll(MethodCallExpr::class.java).any { call ->
+                        call.findAncestor(MethodDeclaration::class.java).orElse(null) === method &&
+                            (isExactProviderAwareProjectCall(call) || isExactLegacyBlockEntityProviderCall(call))
+                    }
+                val directConstructorProviderDemand = method.findAll(ObjectCreationExpr::class.java).any { call ->
+                        call.findAncestor(MethodDeclaration::class.java).orElse(null) === method &&
+                            exactProviderDemandingConstructor(call) != null
+                    }
+                val directlyNeedsProvider = directNbtProviderDemand ||
+                    directMethodCallProviderDemand || directConstructorProviderDemand
+                if (directlyNeedsProvider && parameterTypes == null) {
+                    throw IllegalStateException(
+                        "Cannot resolve exact parameter types for provider-demanded method " +
+                            "$ownerQualified.${method.nameAsString}"
+                    )
+                }
+                candidates += Candidate(
+                    owner.nameAsString,
+                    ownerQualified,
+                    method.nameAsString,
+                    method.parameters.size,
+                    parameterTypes,
+                    header,
+                    source,
+                    methodRange,
+                    method,
+                    directlyNeedsProvider,
+                    method.parameters.size.takeIf {
+                        directConstructorProviderDemand &&
+                            !directNbtProviderDemand && !directMethodCallProviderDemand
+                    }
+                )
             }
         }
         val directCandidateOwners = candidates.map { it.owner }.toSet()
@@ -33965,7 +34724,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                     if (args.size == parameterCount &&
                         (
                             holderLookupProviderNamesAt(source, tokenIndex).isNotEmpty() ||
-                                registryAccessExpressionAt(source, tokenIndex, javaInheritanceIndex) != null
+                                strictRegistryAccessExpressionAt(source, tokenIndex, javaInheritanceIndex) != null
                             )
                     ) {
                         return true
@@ -34015,7 +34774,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
 
         fun providerEvidenceAtCallSite(source: String, offset: Int, receiver: String, targetOwner: String): Boolean =
             holderLookupProviderNamesAt(source, offset).isNotEmpty() ||
-                registryAccessExpressionAt(source, offset, javaInheritanceIndex) != null ||
+                strictRegistryAccessExpressionAt(source, offset, javaInheritanceIndex) != null ||
                 legacyINBTSerializableProviderCallSite(source, offset) ||
                 enclosingProviderAwareConstructorCallSite(source, offset) ||
                 (
@@ -34085,39 +34844,224 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             return false
         }
 
-        val result = candidates
-            .filter {
-                it.directItemStack &&
-                    (isPrivateOrPackagePrivateJavaMethodHeader(it.header) || hasProviderAwareProjectCallSite(it))
-            }
-            .mapTo(linkedSetOf()) {
-                HolderLookupNbtMethod(it.owner, it.methodName, it.parameterCount, it.parameterCount)
-            }
-        var changed: Boolean
-        do {
-            changed = false
-            for (candidate in candidates) {
-                val method = HolderLookupNbtMethod(
-                    candidate.owner,
-                    candidate.methodName,
-                    candidate.parameterCount,
-                    candidate.parameterCount
-                )
-                if (method in result) continue
-                val methodText = candidate.source.substring(candidate.range)
-                val methodParameters = callableParameters(candidate.source, candidate.range)
-                val needsThreadedProvider = holderLookupProviderFromParameters(methodParameters) == null &&
-                    candidate.header.contains("CompoundTag") &&
-                    isPrivateOrPackagePrivateJavaMethodHeader(candidate.header)
-                if (methodTextCallsHolderLookupNbtMethod(methodText, candidate.source, candidate.owner, result) &&
-                    (needsThreadedProvider || registryAccessExpressionAt(candidate.source, candidate.range.first, javaInheritanceIndex) == null)
-                ) {
-                    result += method
-                    changed = true
+        fun hasExactProviderAwareProjectCallSite(target: Candidate): Boolean {
+            val parameterTypes = target.parameterTypes ?: return false
+            return javaFiles.any { javaFile ->
+                val source = runCatching { javaFile.readText() }.getOrDefault("")
+                if (!source.contains("${target.methodName}(")) return@any false
+                val lineOffsets = buildList {
+                    add(0)
+                    source.forEachIndexed { index, character -> if (character == '\n') add(index + 1) }
+                }
+                javaProjectTypeIndex.unit(javaFile).findAll(MethodCallExpr::class.java).any calls@{ call ->
+                    if (call.nameAsString != target.methodName || call.arguments.size != target.parameterCount) {
+                        return@calls false
+                    }
+                    val receiverType = javaProjectTypeIndex.methodCallReceiverType(call) ?: return@calls false
+                    if (!javaProjectTypeIndex.isTypeAssignableTo(receiverType, target.ownerQualified) ||
+                        !javaProjectTypeIndex.argumentsMatchTypes(call, parameterTypes)
+                    ) {
+                        return@calls false
+                    }
+                    val caller = call.findAncestor(MethodDeclaration::class.java).orElse(null) ?: return@calls false
+                    if (caller === target.declaration) return@calls false
+                    if (caller.parameters.any { parameter ->
+                            javaProjectTypeIndex.declaredType(parameter.type, caller) ==
+                                "net.minecraft.core.HolderLookup.Provider"
+                        } || ExactExternalProviderContracts.providerExpression(caller, javaProjectTypeIndex) != null
+                    ) {
+                        return@calls true
+                    }
+                    val begin = call.range.orElse(null)?.begin ?: return@calls false
+                    val offset = lineOffsets.getOrNull(begin.line - 1)?.plus(begin.column - 1) ?: return@calls false
+                    strictRegistryAccessExpressionAt(source, offset, javaInheritanceIndex) != null
                 }
             }
-        } while (changed)
-        return result
+        }
+
+        val overloadedLegacyShapes = candidates
+            .groupBy { Triple(it.ownerQualified, it.methodName, it.parameterCount) }
+            .filterValues { overloads -> overloads.map { it.parameterTypes }.distinct().size > 1 }
+            .keys
+
+        data class CandidateKey(
+            val ownerQualified: String,
+            val methodName: String,
+            val parameterTypes: List<String>
+        )
+
+        fun key(candidate: Candidate): CandidateKey = CandidateKey(
+            candidate.ownerQualified,
+            candidate.methodName,
+            candidate.parameterTypes ?: candidate.declaration.parameters.map { parameter ->
+                "unresolved:${normalizeJavaTypeForContract(parameter.typeAsString)}"
+            }
+        )
+
+        fun contract(candidate: Candidate): HolderLookupNbtMethod {
+            val tagIndexes = candidate.parameterTypes.orEmpty().mapIndexedNotNull { index, type ->
+                index.takeIf { type == "net.minecraft.nbt.CompoundTag" }
+            }
+            if (tagIndexes.size > 1) {
+                throw IllegalStateException(
+                    "Cannot choose a HolderLookup.Provider position for " +
+                        "${candidate.owner}.${candidate.methodName}: multiple CompoundTag parameters"
+                )
+            }
+            val returnsCompoundTag = javaProjectTypeIndex.declaredType(
+                candidate.declaration.type,
+                candidate.declaration
+            ) == "net.minecraft.nbt.CompoundTag"
+            val providerIndex = candidate.providerIndexHint ?: when {
+                tagIndexes.size == 1 -> tagIndexes.single() + 1
+                returnsCompoundTag -> 0
+                else -> candidate.parameterCount
+            }
+            return HolderLookupNbtMethod(
+                candidate.owner,
+                candidate.methodName,
+                candidate.parameterCount,
+                providerIndex,
+                candidate.parameterTypes,
+                Triple(candidate.ownerQualified, candidate.methodName, candidate.parameterCount) in overloadedLegacyShapes
+            )
+        }
+        val candidatesByKey = candidates.groupBy(::key)
+        val ambiguousCandidates = candidatesByKey.filterValues { it.size > 1 }
+        if (ambiguousCandidates.isNotEmpty()) {
+            throw IllegalStateException(
+                "Cannot resolve duplicate exact Java method declarations: " +
+                    ambiguousCandidates.keys.joinToString { method ->
+                        "${method.ownerQualified}.${method.methodName}${method.parameterTypes}"
+                    }
+            )
+        }
+        val candidateByKey = candidatesByKey.mapValues { it.value.single() }
+        val overridePeersByMember = linkedMapOf<CandidateKey, MutableSet<CandidateKey>>()
+        val indexedOverrideFamilies = linkedSetOf<String>()
+        candidateByKey.forEach { (_, candidate) ->
+            val family = javaProjectTypeIndex.exactProjectOverrideFamily(candidate.declaration)
+                ?: return@forEach
+            val familyKey = family.joinToString("|") { member ->
+                "${member.owner}.${member.method.nameAsString}/${member.method.parameters.size}"
+            }
+            if (!indexedOverrideFamilies.add(familyKey)) return@forEach
+            val members = family.map { member ->
+                val parameterTypes = member.method.parameters.map { parameter ->
+                    javaProjectTypeIndex.declaredType(parameter.type, member.method)
+                        ?: throw IllegalStateException(
+                            "Cannot resolve exact override-family parameter type for " +
+                                "${member.owner}.${member.method.nameAsString}"
+                        )
+                }
+                CandidateKey(member.owner, member.method.nameAsString, parameterTypes)
+            }.toSet()
+            val missing = members - candidateByKey.keys
+            if (missing.isNotEmpty()) {
+                throw IllegalStateException(
+                    "Provider-demanded override family is not represented atomically: $missing"
+                )
+            }
+            members.forEach { member ->
+                overridePeersByMember.getOrPut(member) { linkedSetOf() }.addAll(members - member)
+            }
+        }
+        val callsByCaller = candidateByKey.mapValues { (caller, candidate) ->
+            candidate.declaration.findAll(MethodCallExpr::class.java).mapNotNull calls@{ call ->
+                if (call.findAncestor(MethodDeclaration::class.java).orElse(null) !== candidate.declaration) {
+                    return@calls null
+                }
+                val receiverType = javaProjectTypeIndex.methodCallReceiverType(call) ?: return@calls null
+                val matches = candidateByKey.filter { (target, targetCandidate) ->
+                    target.methodName == call.nameAsString &&
+                        target.parameterTypes.size == call.arguments.size &&
+                        targetCandidate.parameterTypes != null &&
+                        javaProjectTypeIndex.isTypeAssignableTo(receiverType, targetCandidate.ownerQualified) &&
+                        javaProjectTypeIndex.argumentsMatchTypes(call, targetCandidate.parameterTypes)
+                }.keys
+                val mostSpecificMatches = matches.filterTo(linkedSetOf()) { target ->
+                    matches.none { other ->
+                        other != target && javaProjectTypeIndex.isTypeAssignableTo(
+                            other.ownerQualified,
+                            target.ownerQualified
+                        )
+                    }
+                }
+                if (mostSpecificMatches.size > 1) {
+                    throw IllegalStateException(
+                        "Ambiguous exact provider call target '$call' in " +
+                            "${candidate.ownerQualified}.${candidate.methodName}: $mostSpecificMatches"
+                    )
+                }
+                mostSpecificMatches.singleOrNull()
+            }.toSet() - caller
+        }
+        val callersByCallee = linkedMapOf<CandidateKey, MutableSet<CandidateKey>>()
+        callsByCaller.forEach { (caller, callees) ->
+            callees.forEach { callee -> callersByCallee.getOrPut(callee) { linkedSetOf() } += caller }
+        }
+        val demanded = candidates.filter { candidate ->
+            candidate.directProviderDemand &&
+                (
+                    strictRegistryAccessExpressionAt(
+                        candidate.source,
+                        candidate.range.first,
+                        javaInheritanceIndex
+                    ) == null || hasExactProviderAwareProjectCallSite(candidate)
+                )
+        }.mapTo(linkedSetOf(), ::key)
+        val demandQueue = ArrayDeque(demanded)
+        while (demandQueue.isNotEmpty()) {
+            val demandedMethod = demandQueue.removeFirst()
+            overridePeersByMember[demandedMethod].orEmpty().forEach { peer ->
+                if (demanded.add(peer)) demandQueue.addLast(peer)
+            }
+            callersByCallee[demandedMethod].orEmpty().forEach { caller ->
+                if (demanded.add(caller)) demandQueue.addLast(caller)
+            }
+        }
+
+        val exactProviderAwareCallSites = demanded.filterTo(linkedSetOf()) { method ->
+            hasExactProviderAwareProjectCallSite(candidateByKey.getValue(method))
+        }
+        val explicitProviderBoundaries = demanded.filterTo(linkedSetOf()) { method ->
+            val candidate = candidateByKey.getValue(method)
+            (candidate.declaration.isPublic || candidate.declaration.isProtected) &&
+                javaProjectTypeIndex.isProvenNonOverride(candidate.declaration)
+        }
+        val reachable = demanded.filterTo(linkedSetOf()) { method ->
+            val candidate = candidateByKey.getValue(method)
+            (candidate.directProviderDemand && isPrivateOrPackagePrivateJavaMethodHeader(candidate.header)) ||
+                method in explicitProviderBoundaries ||
+                method in exactProviderAwareCallSites ||
+                hasProviderAwareProjectCallSite(candidate) ||
+                strictRegistryAccessExpressionAt(candidate.source, candidate.range.first, javaInheritanceIndex) != null
+        }
+        val reachableQueue = ArrayDeque(reachable)
+        while (reachableQueue.isNotEmpty()) {
+            val reachableMethod = reachableQueue.removeFirst()
+            overridePeersByMember[reachableMethod].orEmpty().forEach { peer ->
+                if (peer in demanded && reachable.add(peer)) reachableQueue.addLast(peer)
+            }
+            callsByCaller[reachableMethod].orEmpty().forEach { callee ->
+                if (callee in demanded && reachable.add(callee)) reachableQueue.addLast(callee)
+            }
+        }
+        return reachable.filterTo(linkedSetOf()) { method ->
+            val candidate = candidateByKey.getValue(method)
+            ExactExternalProviderContracts.providerExpression(
+                candidate.declaration,
+                javaProjectTypeIndex
+            ) == null &&
+                (
+                    strictRegistryAccessExpressionAt(
+                        candidate.source,
+                        candidate.range.first,
+                        javaInheritanceIndex
+                    ) == null ||
+                        method in exactProviderAwareCallSites || method in explicitProviderBoundaries
+                    )
+        }.mapTo(linkedSetOf()) { method -> contract(candidateByKey.getValue(method)) }
     }
 
     private fun collectItemStackNbtConstructorsNeedingHolderLookup(
@@ -34572,7 +35516,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         itemStackCollectionNames: Set<String>
     ): Boolean {
         val executableMethod = maskJavaCommentsAndLiterals(methodText)
-        if (executableMethod.contains("ItemStack.of(") || executableMethod.contains("ItemStack::of")) return true
+        if (Regex("""(?<![\w$])ItemStack(?:\.of\s*\(|::of\b)""").containsMatchIn(executableMethod)) return true
         for (name in itemStackNames) {
             val receiver = Regex.escape(name)
             if (Regex("""(?<![\w$])(?:this\.)?$receiver\.(?:save|serializeNBT)\s*\(""").containsMatchIn(executableMethod)) {
@@ -34616,42 +35560,6 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             }
         }
         return false
-    }
-
-    private fun methodTextCallsHolderLookupNbtMethod(
-        methodText: String,
-        source: String,
-        currentOwner: String,
-        methods: Set<HolderLookupNbtMethod>
-    ): Boolean {
-        if (methods.isEmpty()) return false
-        val executableMethod = maskJavaCommentsAndLiterals(methodText)
-        val executableSource = maskJavaCommentsAndLiterals(source)
-        val methodsByName = methods.groupBy { it.methodName }
-        if (methodsByName.keys.none { executableMethod.contains(".$it(") }) return false
-        val ownerNames = methods.map { it.owner }.toSet()
-        val ownerAlternation = ownerNames.joinToString("|") { Regex.escape(it) }
-        val variableTypes = if (ownerAlternation.isBlank()) emptyMap() else {
-            Regex("""\b($ownerAlternation)\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(executableSource)
-                .associate { it.groupValues[2] to it.groupValues[1] }
-        }
-        val callPattern = Regex("""\b((?:this|[A-Za-z_$][\w$]*))\.([A-Za-z_$][\w$]*)\s*\(""")
-        return callPattern.findAll(executableMethod).any { call ->
-            val receiver = call.groupValues[1]
-            val methodName = call.groupValues[2]
-            val targets = methodsByName[methodName].orEmpty()
-            if (targets.isEmpty()) return@any false
-            val openParen = call.range.last
-            val closeParen = findMatchingParen(executableMethod, openParen)
-            if (closeParen < 0) return@any false
-            val args = splitTopLevelJavaArgs(methodText.substring(openParen + 1, closeParen))
-            val receiverOwner = if (receiver == "this") currentOwner else variableTypes[receiver]
-            receiverOwner != null && targets.any { target ->
-                target.owner == receiverOwner &&
-                    (target.parameterCount == null || target.parameterCount == args.size)
-            }
-        }
     }
 
     private fun isJavaCallableDeclarationAt(source: String, offset: Int, methodName: String): Boolean =
@@ -34732,7 +35640,12 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             val params = match.groupValues[3].trim().let { parameterText ->
                 if (parameterText.isBlank()) emptyList() else splitTopLevelJavaArgs(parameterText)
             }
-            val contract = targetContract(owner, methodName, params.size)
+            val contract = resolveHolderLookupNbtDeclarationContract(
+                methodsByName[methodName].orEmpty(),
+                owner,
+                methodName,
+                params
+            ) ?: targetContract(owner, methodName, params.size)
             if (contract == null) {
                 return@replaceExecutableRegex match.value
             }
@@ -35777,6 +36690,10 @@ ${indent}    private HeaderAndFooterLayout layout;
         while (true) {
             val tokenIndex = result.indexOf("ItemStack.of(", itemStackOfCursor)
             if (tokenIndex < 0) break
+            if (tokenIndex > 0 && Character.isJavaIdentifierPart(result[tokenIndex - 1])) {
+                itemStackOfCursor = tokenIndex + "ItemStack.of(".length
+                continue
+            }
             val openParen = tokenIndex + "ItemStack.of".length
             val closeParen = findMatchingParen(result, openParen)
             if (closeParen < 0) {
@@ -38357,7 +39274,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
     ): String {
         val qualifiedEmpty = "net.minecraft.core.RegistryAccess.EMPTY"
         val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains(qualifiedEmpty)) return source
+        val unqualifiedEmpty = Regex("""(?<![\w.])RegistryAccess\.EMPTY\b""")
+        if (!executableCode.contains(qualifiedEmpty) && !unqualifiedEmpty.containsMatchIn(executableCode)) return source
         val edits = mutableListOf<Pair<IntRange, String>>()
         var cursor = 0
         while (cursor < executableCode.length) {
@@ -38365,11 +39283,21 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             if (index < 0) break
             val replacement = registryAccessExpressionAt(source, index, javaInheritanceIndex)
             if (replacement == null || replacement == qualifiedEmpty) {
-                cursor = index + qualifiedEmpty.length
-                continue
+                throw IllegalStateException(
+                    "Cannot resolve exact HolderLookup.Provider for executable $qualifiedEmpty at offset $index"
+                )
             }
             edits += index until index + qualifiedEmpty.length to replacement
             cursor = index + qualifiedEmpty.length
+        }
+        unqualifiedEmpty.findAll(executableCode).forEach { match ->
+            val replacement = registryAccessExpressionAt(source, match.range.first, javaInheritanceIndex)
+            if (replacement == null || replacement == match.value) {
+                throw IllegalStateException(
+                    "Cannot resolve exact HolderLookup.Provider for executable ${match.value} at offset ${match.range.first}"
+                )
+            }
+            edits += match.range to replacement
         }
         return applyStringEdits(source, edits)
     }
