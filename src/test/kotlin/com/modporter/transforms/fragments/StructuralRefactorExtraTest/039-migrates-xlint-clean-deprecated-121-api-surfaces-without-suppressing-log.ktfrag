@@ -473,8 +473,14 @@
         StructuralRefactorPass().apply(projectDir)
         val source = tempDir.resolve("src/main/java/com/example/PotionFactory.java").readText()
 
-        assertTrue(source.contains("net.minecraft.Util.make(new ItemStack(Items.POTION), stack -> stack.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.AWKWARD)))"), source)
-        assertTrue(source.contains("net.minecraft.Util.make(new ItemStack(Items.POTION), stack -> stack.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.WATER)))"), source)
+        for (potion in listOf("AWKWARD", "WATER")) {
+            val factory = Regex(
+                """net\.minecraft\.Util\.make\(new ItemStack\(Items\.POTION\),\s*modPorterPotionStack\d*\s*->\s*""" +
+                    """modPorterPotionStack\d*\.update\(DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY,\s*""" +
+                    """Potions\.$potion,\s*PotionContents::withPotion\)\)"""
+            )
+            assertTrue(factory.containsMatchIn(source), source)
+        }
     }
 
     @Test

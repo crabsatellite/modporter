@@ -1,6 +1,7 @@
 package com.modporter.transforms
 
 import com.modporter.core.pipeline.Confidence
+import com.modporter.core.transforms.build.BuildSystemPass
 import com.modporter.core.transforms.structural.StructuralRefactorPass
 import com.modporter.core.transforms.text.TextReplacementPass
 import com.modporter.mapping.MappingDatabase
@@ -16664,7 +16665,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, emeraldCost), new ItemStack(Items.DIRT, 2), 16, 2, 0.05F)"), migrated)
         assertTrue(migrated.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 10), new ItemStack(Items.DIRT), 16, 2, 0.05F)"), migrated)
         assertFalse(migrated.contains("priceMultiplier);"), migrated)
-        assertTrue(migrated.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
+        assertTrue(migrated.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
         assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE)"))
         assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_EQUIPMENT_DROP)"))
         assertTrue(migrated.contains("import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;"))
@@ -21119,12 +21120,14 @@ bus.addListener(ActualListenerRegistry::register);
         val projectile = srcDir.resolve("ProjectileEntity.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
-        assertTrue(potion.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"))
-        assertTrue(potion.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
-        assertTrue(potion.contains("!stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().iterator().hasNext()"))
-        assertTrue(potion.contains("for (MobEffectInstance effect : stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects())"))
-        assertTrue(potion.contains("stack.set(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)"))
-        assertTrue(potion.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).addPotionTooltip(tooltip::add, 1.0F, 20.0F)"))
+        assertTrue(potion.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"))
+        assertTrue(potion.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
+        assertTrue(potion.contains("!(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().iterator().hasNext()"))
+        assertTrue(potion.contains("for (MobEffectInstance effect : (stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects())"))
+        assertTrue(potion.contains("(stack).update(DataComponents.POTION_CONTENTS, PotionContents.EMPTY"))
+        assertTrue(potion.contains("new PotionContents(java.util.Optional.empty()"))
+        assertTrue(!potion.contains("stack.set(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)"))
+        assertTrue(potion.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).addPotionTooltip(tooltip::add, 1.0F, 20.0F)"))
         assertTrue(!potion.contains("PotionUtils"))
         assertTrue(!potion.contains("TODO"))
         assertTrue(!potion.contains("[forge2neo]"))
@@ -21184,7 +21187,7 @@ bus.addListener(ActualListenerRegistry::register);
                 .containsMatchIn(potion),
             potion
         )
-        assertTrue(potion.contains("return stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"), potion)
+        assertTrue(potion.contains("return (stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"), potion)
         assertTrue(potion.contains("""|| "minecraft:empty".equals(tag.getString("Potion"));"""), potion)
         assertTrue(!potion.contains("import net.minecraft.world.item.alchemy.PotionUtils;"), potion)
     }
@@ -42170,8 +42173,14 @@ bus.addListener(ActualListenerRegistry::register);
         StructuralRefactorPass().apply(projectDir)
         val source = tempDir.resolve("src/main/java/com/example/PotionFactory.java").readText()
 
-        assertTrue(source.contains("net.minecraft.Util.make(new ItemStack(Items.POTION), stack -> stack.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.AWKWARD)))"), source)
-        assertTrue(source.contains("net.minecraft.Util.make(new ItemStack(Items.POTION), stack -> stack.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.WATER)))"), source)
+        for (potion in listOf("AWKWARD", "WATER")) {
+            val factory = Regex(
+                """net\.minecraft\.Util\.make\(new ItemStack\(Items\.POTION\),\s*modPorterPotionStack\d*\s*->\s*""" +
+                    """modPorterPotionStack\d*\.update\(DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY,\s*""" +
+                    """Potions\.$potion,\s*PotionContents::withPotion\)\)"""
+            )
+            assertTrue(factory.containsMatchIn(source), source)
+        }
     }
 
     @Test
@@ -44671,5 +44680,302 @@ $suppliers
 
         assertEquals(original, source.readText())
         assertEquals(lookalikeOriginal, lookalike.readText())
+    }
+
+    @Test
+    fun `potion utils migration preserves evaluation collection and receiver contracts`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val exact = srcDir.resolve("ExactPotionCalls.java")
+        exact.writeText("""
+            package com.example;
+
+            import java.util.Collection;
+            import java.util.List;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.alchemy.Potion;
+            import net.minecraft.world.item.alchemy.PotionUtils;
+            import net.minecraft.world.item.alchemy.Potions;
+
+            class ExactPotionCalls {
+                private static final String DOC =
+                    "PotionUtils.setPotion(new ItemStack(Items.POTION), Potions.WATER)";
+
+                ItemStack create(Potion potion) {
+                    return PotionUtils.setPotion(new ItemStack(Items.POTION), next(potion));
+                }
+
+                ItemStack configure(ItemStack stack) {
+                    return PotionUtils.setPotion(stack, Potions.WATER);
+                }
+
+                void clear(ItemStack stack) {
+                    PotionUtils.setPotion(stack, Potions.EMPTY);
+                }
+
+                List<MobEffectInstance> custom(ItemStack stack) {
+                    List<MobEffectInstance> result = PotionUtils.getCustomEffects(stack);
+                    result.clear();
+                    return result;
+                }
+
+                ItemStack setCustom(ItemStack stack, Collection<MobEffectInstance> effects) {
+                    return PotionUtils.setCustomEffects(stack, effects);
+                }
+
+                int conditionalColor(boolean first, ItemStack left, ItemStack right) {
+                    return PotionUtils.getColor(first ? left : right);
+                }
+
+                int castColor(Object stack) {
+                    return PotionUtils.getColor((ItemStack) stack);
+                }
+
+                boolean water(ItemStack stack) {
+                    return Potions.WATER == PotionUtils.getPotion(stack);
+                }
+
+                boolean absent(ItemStack stack) {
+                    return PotionUtils.getPotion(stack) == Potions.EMPTY;
+                }
+
+                void tooltip(ItemStack stack, List<Component> lines) {
+                    PotionUtils.addPotionTooltip(stack, lines, 0.5F);
+                }
+
+                int unresolved(CompoundTag tag) {
+                    return PotionUtils.getColor(PotionUtils.getAllEffects(tag));
+                }
+
+                Potion next(Potion potion) {
+                    return potion;
+                }
+            }
+        """.trimIndent())
+
+        val lookalike = srcDir.resolve("LookalikePotionCalls.java")
+        val lookalikeOriginal = """
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            class LookalikePotionCalls {
+                static class PotionUtils {
+                    static int getColor(ItemStack stack) {
+                        return 0;
+                    }
+                }
+
+                int color(ItemStack stack) {
+                    return PotionUtils.getColor(stack);
+                }
+            }
+        """.trimIndent()
+        lookalike.writeText(lookalikeOriginal)
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = exact.readText()
+
+        assertTrue(
+            Regex(
+                """net\.minecraft\.Util\.make\(new ItemStack\(Items\.POTION\),\s*""" +
+                    """modPorterPotionStack\d*\s*->\s*modPorterPotionStack\d*\.update\(""" +
+                    """DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY,\s*next\(potion\),\s*""" +
+                    """PotionContents::withPotion\)\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(!migrated.contains("PotionContents.createItemStack"), migrated)
+        assertTrue(
+            Regex(
+                """net\.minecraft\.Util\.make\(stack,\s*modPorterPotionStack\d*\s*->\s*""" +
+                    """modPorterPotionStack\d*\.update\(DataComponents\.POTION_CONTENTS,\s*""" +
+                    """PotionContents\.EMPTY,\s*Potions\.WATER,\s*PotionContents::withPotion\)\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(migrated.contains("(stack).update(DataComponents.POTION_CONTENTS, PotionContents.EMPTY"), migrated)
+        assertTrue(migrated.contains("new PotionContents(java.util.Optional.empty()"), migrated)
+        assertTrue(
+            migrated.contains(
+                "new java.util.ArrayList<>((stack).getOrDefault(" +
+                    "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).customEffects())"
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("result.clear();"), migrated)
+        assertTrue(
+            Regex(
+                """net\.minecraft\.Util\.make\(stack,\s*modPorterPotionStack\d*\s*->\s*""" +
+                    """net\.minecraft\.Util\.make\(effects,\s*modPorterPotionEffects\d*\s*->\s*\{\s*""" +
+                    """if\s*\(!modPorterPotionEffects\d*\.isEmpty\(\)\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(
+            Regex(
+                """java\.util\.stream\.Stream\.concat\(""" +
+                    """modPorterPotionContents\d*\.customEffects\(\)\.stream\(\),\s*""" +
+                    """modPorterPotionEffects\d*\.stream\(\)\.map\(""" +
+                    """net\.minecraft\.world\.effect\.MobEffectInstance::new\)\)\.toList\(\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "(first ? left : right).getOrDefault(" +
+                    "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "((ItemStack) stack).getOrDefault(" +
+                    "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"
+            ),
+            migrated
+        )
+        assertTrue(
+            Regex(
+                """\(stack\)\.getOrDefault\(DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY\)""" +
+                    """\.potion\(\)\.map\(\s*modPorterPotionHolder\d*\s*->\s*""" +
+                    """modPorterPotionHolder\d*\.value\(\)\s*==\s*Potions\.WATER\.value\(\)\)""" +
+                    """\.orElse\(false\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(!migrated.contains(".is(Potions.WATER)"), migrated)
+        assertTrue(
+            migrated.contains(
+                "(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)" +
+                    ".potion().isEmpty()"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)" +
+                    ".addPotionTooltip(lines::add, 0.5F, 20.0F)"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("return PotionUtils.getColor(PotionUtils.getAllEffects(tag));"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "\"PotionUtils.setPotion(new ItemStack(Items.POTION), Potions.WATER)\""
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("import net.minecraft.world.item.alchemy.PotionUtils;"), migrated)
+        assertEquals(lookalikeOriginal, lookalike.readText())
+
+        val residualGate = BuildSystemPass().apply(tempDir)
+        assertTrue(residualGate.errors.any { it.contains("PotionUtils") }, residualGate.errors.toString())
+    }
+
+    @Test
+    fun `potion utils migration qualifies conflicting target names and outer this fields`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("ConflictingPotionNames.java")
+        source.writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.alchemy.PotionUtils;
+
+            class ConflictingPotionNames {
+                static class PotionContents {
+                }
+
+                static class DataComponents {
+                }
+
+                ItemStack stack;
+
+                class Inner {
+                    CompoundTag stack;
+
+                    int outerColor() {
+                        return PotionUtils.getColor(ConflictingPotionNames.this.stack);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = source.readText()
+
+        assertTrue(
+            migrated.contains(
+                "(ConflictingPotionNames.this.stack).getOrDefault(" +
+                    "net.minecraft.core.component.DataComponents.POTION_CONTENTS, " +
+                    "net.minecraft.world.item.alchemy.PotionContents.EMPTY).getColor()"
+            ),
+            migrated
+        )
+        assertTrue(!migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
+        assertTrue(!migrated.contains("import net.minecraft.world.item.alchemy.PotionContents;"), migrated)
+        assertTrue(migrated.contains("static class PotionContents"), migrated)
+        assertTrue(migrated.contains("static class DataComponents"), migrated)
+    }
+
+    @Test
+    fun `fully qualified looking value chains do not prove minecraft owners`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("QualifiedLookalike.java")
+        val original = """
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            class QualifiedLookalike {
+                static final Root net = new Root();
+
+                int color(ItemStack stack) {
+                    return net.minecraft.world.item.alchemy.PotionUtils.getColor(stack);
+                }
+
+                static class Root {
+                    final Minecraft minecraft = new Minecraft();
+                }
+
+                static class Minecraft {
+                    final World world = new World();
+                }
+
+                static class World {
+                    final Item item = new Item();
+                }
+
+                static class Item {
+                    final Alchemy alchemy = new Alchemy();
+                }
+
+                static class Alchemy {
+                    final ProjectPotionUtils PotionUtils = new ProjectPotionUtils();
+                }
+
+                static class ProjectPotionUtils {
+                    int getColor(ItemStack stack) {
+                        return 0;
+                    }
+                }
+            }
+        """.trimIndent()
+        source.writeText(original)
+
+        StructuralRefactorPass().apply(tempDir)
+
+        assertEquals(original, source.readText())
     }
 }

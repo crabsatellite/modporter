@@ -550,10 +550,13 @@
                 structureIssues.add("Hands-off gate failed: $reviewChanges medium/low-confidence changes require review")
             }
             var compile = CheckResult.notRun("MODPORTER_BENCHMARK_COMPILE=false")
-            if (structureIssues.isEmpty() && options.compile) {
-                structureIssues.addAll(stageBenchmarkDependencies(case, artifactRoot, outputDir))
+            val compileSetupIssues = if (options.compile) {
+                stageBenchmarkDependencies(case, artifactRoot, outputDir)
+            } else {
+                emptyList()
             }
-            if (structureIssues.isEmpty() && options.compile) {
+            structureIssues.addAll(compileSetupIssues)
+            if (compileSetupIssues.isEmpty() && options.compile) {
                 compile = runGradleTask(outputDir, reportsDir, case.id, "compileJava", options.timeoutSeconds)
             }
 

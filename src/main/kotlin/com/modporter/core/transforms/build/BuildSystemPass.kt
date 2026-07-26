@@ -401,6 +401,7 @@ class BuildSystemPass(
 
         try {
             errors.addAll(detectForbiddenReflection(projectDir))
+            errors.addAll(ResidualRemovedApiGate.scan(projectDir))
             if (!dryRun) {
                 errors.addAll(detectLegacyCoremodApiReferences(projectDir))
             }

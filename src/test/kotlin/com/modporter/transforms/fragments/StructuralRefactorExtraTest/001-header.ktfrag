@@ -1,6 +1,7 @@
 package com.modporter.transforms
 
 import com.modporter.core.pipeline.Confidence
+import com.modporter.core.transforms.build.BuildSystemPass
 import com.modporter.core.transforms.structural.StructuralRefactorPass
 import com.modporter.core.transforms.text.TextReplacementPass
 import com.modporter.mapping.MappingDatabase

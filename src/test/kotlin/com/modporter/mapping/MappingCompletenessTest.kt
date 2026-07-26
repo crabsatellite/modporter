@@ -4447,22 +4447,19 @@ class MappingCompletenessTest {
     }
 
     @Test
-    fun `potion component migration uses executable source evidence`() {
+    fun `potion component migration requires exact ast owners`() {
         val source = Path.of("")
             .toAbsolutePath()
             .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
             .readText()
-        val start = source.indexOf("""maskJavaCommentsAndLiterals(result).contains("PotionUtils.")""")
-        assertTrue(start >= 0, "potion component migration block is missing")
-        val end = source.indexOf("result = migrateUseOnContextDataComponentHasCalls(result)", start + 1).let {
-            if (it < 0) source.length else it
-        }
-        val body = source.substring(start, end)
+        val start = source.indexOf("private fun migrateLegacyPotionUtilsCalls(source: String): String")
+        assertTrue(start >= 0, "PotionUtils AST migration is missing")
+        val body = source.substring(start)
         val offenders = listOf(
-            "raw PotionUtils prefilter" to """result.contains("PotionUtils.")""",
-            "raw PotionUtils replacement" to Regex("""Regex\([\s\S]*?PotionUtils[\s\S]*?\)\s*\.\s*replace\(result"""),
-            "raw Potions.EMPTY replacement" to "result.replace(\"Potions.EMPTY\"",
-            "raw Potion.byName replacement" to Regex("""Regex\([\s\S]*?Potion\.byName[\s\S]*?\)\s*\.\s*replace\(result""")
+            "PotionUtils regex replacement" to Regex("""Regex\([\s\S]*?PotionUtils"""),
+            "executable regex replacement" to "replaceExecutableRegex(",
+            "raw source replacement" to ".replace(source",
+            "simple-name-only owner check" to """call.scope.map { it.toString() == "PotionUtils" }"""
         )
             .filter { (_, marker) ->
                 when (marker) {
@@ -4474,13 +4471,15 @@ class MappingCompletenessTest {
             .map { (label, _) -> label }
 
         assertTrue(
-            body.contains("maskJavaCommentsAndLiterals(result)") &&
-                body.contains("replaceExecutableRegex(") &&
-                body.contains("migrateLegacyPotionEmptyStringChecks(result)") &&
-                body.contains("migratedPotionUtils") &&
-                body.contains("needsDataComponents = true") &&
-                body.contains("needsPotionContents = true"),
-            "Potion component migration must inspect executable Java and gate import flags on real rewrites"
+            source.contains("result = migrateLegacyPotionUtilsCalls(result)") &&
+                body.contains("val parsed = parser.parse(source)") &&
+                body.contains("LexicalPreservingPrinter.setup(cu)") &&
+                body.contains("cu.findAll(MethodCallExpr::class.java)") &&
+                body.contains("isExactPotionUtilsCall") &&
+                body.contains("exactStaticScope") &&
+                body.contains("isProvablyItemStack") &&
+                body.contains("Cannot parse source containing legacy Minecraft PotionUtils calls"),
+            "Potion component migration must prove the API owner and argument context through the Java AST"
         )
         assertTrue(
             source.contains("private fun migrateLegacyPotionEmptyStringChecks(source: String): String") &&
@@ -4491,8 +4490,14 @@ class MappingCompletenessTest {
             "Potion string-key migration must verify source matches against executable Java ranges"
         )
         assertTrue(
+            !source.contains("""Regex(""" + "\"\"\"\\bPotions\\.EMPTY") &&
+                !source.contains("""Regex(""" + "\"\"\"Potion\\.byName") &&
+                !source.contains("""{ "Potions.WATER.value()" }"""),
+            "Removed potion identities must not be guessed through Potions.EMPTY-to-water or Potion.byName regex fallbacks"
+        )
+        assertTrue(
             offenders.isEmpty(),
-            "Potion component migration must not rewrite comments or string literals with raw replacements: $offenders"
+            "Potion component migration must not fall back to regex or simple-name owner guesses: $offenders"
         )
     }
 

@@ -41,3 +41,4 @@
 041-enum-delegated-simple-channel-registrations-migrate-as-a-closed-payload-.ktfrag
 042-third-party-record-components-and-event-bus-contracts-are-exact.ktfrag
 043-deferred-holder-generics-use-lexical-and-registry-contracts.ktfrag
+044-potion-utils-migration-uses-exact-ast-contracts.ktfrag

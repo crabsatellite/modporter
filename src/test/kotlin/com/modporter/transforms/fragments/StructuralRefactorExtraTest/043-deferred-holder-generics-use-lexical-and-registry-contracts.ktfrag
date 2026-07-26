@@ -149,4 +149,3 @@
         assertEquals(original, source.readText())
         assertEquals(lookalikeOriginal, lookalike.readText())
     }
-}
