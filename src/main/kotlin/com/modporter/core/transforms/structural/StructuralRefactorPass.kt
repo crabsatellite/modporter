@@ -65985,32 +65985,103 @@ public class ${builder.className} implements RecipeBuilder {
 
                 "getPotion" -> {
                     if (call.arguments.size != 1 || !isProvablyItemStack(call.arguments.single())) continue
-                    val comparison = call.parentNode.orElse(null) as? BinaryExpr ?: continue
-                    if (comparison.operator !in setOf(BinaryExpr.Operator.EQUALS, BinaryExpr.Operator.NOT_EQUALS)) continue
-                    val other = when {
-                        comparison.left === call -> comparison.right
-                        comparison.right === call -> comparison.left
-                        else -> continue
-                    }
                     val contents = potionContents(call.arguments.single())
-                    val replacement = when {
-                        isExactStaticConstant(other, "Potions", potionsFqn, "EMPTY") -> {
-                            val method = if (comparison.operator == BinaryExpr.Operator.EQUALS) "isEmpty" else "isPresent"
-                            parseExpression("$contents.potion().$method()")
+                    val comparison = call.parentNode.orElse(null) as? BinaryExpr
+                    if (comparison != null &&
+                        comparison.operator in setOf(BinaryExpr.Operator.EQUALS, BinaryExpr.Operator.NOT_EQUALS)
+                    ) {
+                        val other = when {
+                            comparison.left === call -> comparison.right
+                            comparison.right === call -> comparison.left
+                            else -> null
                         }
-                        other is FieldAccessExpr &&
-                            exactStaticScope(other.scope, "Potions", potionsFqn) -> {
+                        val replacement = when {
+                            other == null -> null
+                            isExactStaticConstant(other, "Potions", potionsFqn, "EMPTY") -> {
+                                val method =
+                                    if (comparison.operator == BinaryExpr.Operator.EQUALS) "isEmpty" else "isPresent"
+                                parseExpression("$contents.potion().$method()")
+                            }
+                            other is FieldAccessExpr &&
+                                exactStaticScope(other.scope, "Potions", potionsFqn) -> {
+                                val holderName = generatedName("modPorterPotionHolder")
+                                val membership =
+                                    "$contents.potion().map($holderName -> " +
+                                        "$holderName.value() == $other.value()).orElse(false)"
+                                parseExpression(
+                                    if (comparison.operator == BinaryExpr.Operator.EQUALS) membership else "!$membership"
+                                )
+                            }
+                            else -> null
+                        }
+                        if (replacement != null) replace(comparison, replacement)
+                        continue
+                    }
+
+                    val variable = call.parentNode.orElse(null) as? VariableDeclarator ?: continue
+                    if (variable.initializer.orElse(null) !== call ||
+                        !exactTypeReference(variable.typeAsString, "Potion", potionContentsFqn.removeSuffix("Contents"))
+                    ) {
+                        continue
+                    }
+                    val declaration = variable.parentNode.orElse(null) as? VariableDeclarationExpr ?: continue
+                    if (declaration.variables.size != 1) continue
+                    val callable = variable.findAncestor(CallableDeclaration::class.java).orElse(null) ?: continue
+                    val declarationStart = variable.range.map { it.begin }.orElse(null) ?: continue
+                    val uses = callable.findAll(NameExpr::class.java)
+                        .filter { it.nameAsString == variable.nameAsString }
+                        .filter {
+                            it.findAncestor(CallableDeclaration::class.java).orElse(null) === callable &&
+                                it.range.map { range -> declarationStart.isBefore(range.begin) }.orElse(false)
+                        }
+                    val supportedComparisons = mutableListOf<Triple<BinaryExpr, FieldAccessExpr, Boolean>>()
+                    var graphSupported = true
+                    for (use in uses) {
+                        val binary = use.parentNode.orElse(null) as? BinaryExpr
+                        if (binary == null ||
+                            binary.operator !in setOf(BinaryExpr.Operator.EQUALS, BinaryExpr.Operator.NOT_EQUALS)
+                        ) {
+                            graphSupported = false
+                            break
+                        }
+                        val other = when {
+                            binary.left === use -> binary.right
+                            binary.right === use -> binary.left
+                            else -> null
+                        } as? FieldAccessExpr
+                        if (other == null || !exactStaticScope(other.scope, "Potions", potionsFqn)) {
+                            graphSupported = false
+                            break
+                        }
+                        supportedComparisons += Triple(
+                            binary,
+                            other,
+                            binary.operator == BinaryExpr.Operator.EQUALS
+                        )
+                    }
+                    if (!graphSupported) continue
+
+                    for ((binary, other, equals) in supportedComparisons) {
+                        val replacement = if (other.nameAsString == "EMPTY") {
+                            parseExpression(
+                                "${variable.nameAsString}.${if (equals) "isEmpty" else "isPresent"}()"
+                            )
+                        } else {
                             val holderName = generatedName("modPorterPotionHolder")
                             val membership =
-                                "$contents.potion().map($holderName -> " +
+                                "${variable.nameAsString}.map($holderName -> " +
                                     "$holderName.value() == $other.value()).orElse(false)"
-                            parseExpression(
-                                if (comparison.operator == BinaryExpr.Operator.EQUALS) membership else "!$membership"
-                            )
+                            parseExpression(if (equals) membership else "!$membership")
                         }
-                        else -> null
+                        replace(binary, replacement)
                     }
-                    if (replacement != null) replace(comparison, replacement)
+                    variable.setType(
+                        StaticJavaParser.parseType(
+                            "java.util.Optional<net.minecraft.core.Holder<" +
+                                "net.minecraft.world.item.alchemy.Potion>>"
+                        )
+                    )
+                    replace(call, parseExpression("$contents.potion()"))
                 }
 
                 "getColor" -> {
@@ -66040,6 +66111,14 @@ public class ${builder.className} implements RecipeBuilder {
                         replace(parentCall, parseExpression("!$allEffects.iterator().hasNext()"))
                     } else if (call.parentNode.orElse(null) is com.github.javaparser.ast.stmt.ForEachStmt) {
                         replace(call, parseExpression(allEffects))
+                    } else {
+                        replace(
+                            call,
+                            parseExpression(
+                                "java.util.stream.StreamSupport.stream($allEffects.spliterator(), false)" +
+                                    ".collect(java.util.stream.Collectors.toCollection(java.util.ArrayList::new))"
+                            )
+                        )
                     }
                 }
 

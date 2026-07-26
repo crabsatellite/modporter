@@ -40,6 +40,12 @@
                     return result;
                 }
 
+                List<MobEffectInstance> all(ItemStack stack) {
+                    List<MobEffectInstance> result = PotionUtils.getMobEffects(stack);
+                    result.clear();
+                    return result;
+                }
+
                 ItemStack setCustom(ItemStack stack, Collection<MobEffectInstance> effects) {
                     return PotionUtils.setCustomEffects(stack, effects);
                 }
@@ -58,6 +64,21 @@
 
                 boolean absent(ItemStack stack) {
                     return PotionUtils.getPotion(stack) == Potions.EMPTY;
+                }
+
+                boolean storedWater(ItemStack stack) {
+                    Potion potion = PotionUtils.getPotion(stack);
+                    return potion == Potions.WATER;
+                }
+
+                boolean storedNonEmpty(ItemStack stack) {
+                    Potion potion = PotionUtils.getPotion(stack);
+                    return potion != Potions.EMPTY;
+                }
+
+                String unsupportedPotionUse(ItemStack stack) {
+                    Potion potion = PotionUtils.getPotion(stack);
+                    return potion.toString();
                 }
 
                 void tooltip(ItemStack stack, List<Component> lines) {
@@ -126,6 +147,14 @@
         )
         assertTrue(migrated.contains("result.clear();"), migrated)
         assertTrue(
+            migrated.contains(
+                "java.util.stream.StreamSupport.stream((stack).getOrDefault(" +
+                    "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().spliterator(), false)" +
+                    ".collect(java.util.stream.Collectors.toCollection(java.util.ArrayList::new))"
+            ),
+            migrated
+        )
+        assertTrue(
             Regex(
                 """net\.minecraft\.Util\.make\(stack,\s*modPorterPotionStack\d*\s*->\s*""" +
                     """net\.minecraft\.Util\.make\(effects,\s*modPorterPotionEffects\d*\s*->\s*\{\s*""" +
@@ -170,6 +199,30 @@
             migrated.contains(
                 "(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)" +
                     ".potion().isEmpty()"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "java.util.Optional<net.minecraft.core.Holder<" +
+                    "net.minecraft.world.item.alchemy.Potion>> potion = " +
+                    "(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion();"
+            ),
+            migrated
+        )
+        assertTrue(
+            Regex(
+                """return potion\.map\(\s*modPorterPotionHolder\d* -> """ +
+                    """modPorterPotionHolder\d*\.value\(\) == Potions\.WATER\.value\(\)\)""" +
+                    """\.orElse\(false\);"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(migrated.contains("return potion.isPresent();"), migrated)
+        assertTrue(
+            migrated.contains(
+                "Potion potion = PotionUtils.getPotion(stack);\n" +
+                    "        return potion.toString();"
             ),
             migrated
         )

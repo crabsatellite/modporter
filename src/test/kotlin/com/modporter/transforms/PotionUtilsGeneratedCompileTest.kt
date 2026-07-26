@@ -30,6 +30,7 @@ class PotionUtilsGeneratedCompileTest {
             import net.minecraft.world.effect.MobEffectInstance;
             import net.minecraft.world.item.ItemStack;
             import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.alchemy.Potion;
             import net.minecraft.world.item.alchemy.PotionUtils;
             import net.minecraft.world.item.alchemy.Potions;
 
@@ -44,6 +45,12 @@ class PotionUtilsGeneratedCompileTest {
 
                 List<MobEffectInstance> custom(ItemStack stack) {
                     List<MobEffectInstance> effects = PotionUtils.getCustomEffects(stack);
+                    effects.clear();
+                    return effects;
+                }
+
+                List<MobEffectInstance> all(ItemStack stack) {
+                    List<MobEffectInstance> effects = PotionUtils.getMobEffects(stack);
                     effects.clear();
                     return effects;
                 }
@@ -66,6 +73,11 @@ class PotionUtilsGeneratedCompileTest {
 
                 boolean absent(ItemStack stack) {
                     return PotionUtils.getPotion(stack) == Potions.EMPTY;
+                }
+
+                boolean storedWater(ItemStack stack) {
+                    Potion potion = PotionUtils.getPotion(stack);
+                    return potion == Potions.WATER;
                 }
 
                 void tooltip(ItemStack stack, List<Component> lines) {
