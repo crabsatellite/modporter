@@ -1,4 +1,163 @@
 
+    private fun migrateProjectMapEntryValueGetCalls(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                val migrated = migrateMapEntryValueGetCalls(original)
+                if (migrated == original) return@forEach
+                if (!dryRun) {
+                    javaFile.writeText(migrated)
+                }
+                changes.add(Change(
+                    file = javaFile,
+                    line = 0,
+                    description = "Migrate Map.Entry value reads away from legacy delegate get calls",
+                    before = "entry.get()",
+                    after = "entry.getValue()",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-map-entry-value-get"
+                ))
+            }
+        return changes
+    }
+
+    private fun hasMapEntryVariableEvidenceBefore(executableCode: String, variable: String, offset: Int): Boolean {
+        val start = (offset - 2000).coerceAtLeast(0)
+        val window = executableCode.substring(start, offset)
+        val variablePattern = Regex.escape(variable)
+        return Regex("""Map\.Entry\b[\s\S]*?\b$variablePattern\s*:""").containsMatchIn(window) ||
+            Regex("""Map\.Entry\b[\s\S]*?\b$variablePattern\s*=""").containsMatchIn(window) ||
+            Regex("""Map\.Entry\b[\s\S]*?\b$variablePattern\s*;""").containsMatchIn(window)
+    }
+
+    private fun migrateFluidHolderConstructorArgumentsSource(
+        source: String,
+        fluidHolderFields: Set<String>,
+        fluidHolderTupleFields: Set<String>
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("DeferredHolder") && fluidHolderFields.isEmpty() && fluidHolderTupleFields.isEmpty()) return source
+
+        val localFluidHolderFields = Regex(
+            """\b(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*(?:[A-Za-z_$][\w$]*\.)*Fluid\s*,[^;\r\n=]+>\s+([A-Za-z_$][\w$]*)\b"""
+        ).findAll(executableCode)
+            .map { it.groupValues[1] }
+            .toSet()
+        val localFluidHolderTupleFields = Regex(
+            """\b(?:net\.minecraft\.util\.)?Tuple\s*<\s*(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*(?:[A-Za-z_$][\w$]*\.)*Fluid\s*,[^>]+>\s*,\s*(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*(?:[A-Za-z_$][\w$]*\.)*Fluid\s*,[^>]+>\s*>\s+([A-Za-z_$][\w$]*)\b"""
+        ).findAll(executableCode)
+            .map { it.groupValues[1] }
+            .toSet()
+
+        fun unwrapFluidHolderArgument(argument: String): String {
+            val trimmed = argument.trim()
+            if (trimmed.endsWith(".get()") || trimmed.endsWith(".value()")) return argument
+            if (trimmed in localFluidHolderFields || trimmed in fluidHolderFields) {
+                return "${argument.trimEnd()}.get()"
+            }
+            val tupleAccess = Regex("""(.+)\.(getA|getB)\(\)""").matchEntire(trimmed)
+            if (tupleAccess != null) {
+                val receiver = tupleAccess.groupValues[1].trim()
+                if (receiver in localFluidHolderTupleFields || receiver in fluidHolderTupleFields) {
+                    return "${argument.trimEnd()}.get()"
+                }
+            }
+            return argument
+        }
+
+        fun rewriteFirstFluidArgument(className: String, current: String): String =
+            rewriteExecutableJavaNew(current, className) { args ->
+                if (args.isEmpty()) return@rewriteExecutableJavaNew null
+                val migratedFirst = unwrapFluidHolderArgument(args[0])
+                if (migratedFirst == args[0]) return@rewriteExecutableJavaNew null
+                val migratedArgs = args.toMutableList()
+                migratedArgs[0] = migratedFirst
+                "new $className(${migratedArgs.joinToString(", ") { it.trim() }})"
+            }
+
+        var result = source
+        result = rewriteFirstFluidArgument("BucketItem", result)
+        result = rewriteFirstFluidArgument("LiquidBlock", result)
+        result = rewriteFirstFluidArgument("FluidStack", result)
+        return result
+    }
+
+    private fun replaceMethodBody(source: String, methodName: String, replacement: String): String =
+        replaceExecutableMethodBody(source, methodName, replacement)
+
+    private fun replaceExecutableMethodBody(source: String, methodName: String, replacement: String): String {
+        val pattern = Regex("""(?m)(?:@\w+(?:\([^)]*\))?\s*)*(?:public|private|protected)\s+(?:static\s+)?[\w<>\[\].?]+\s+${Regex.escape(methodName)}\s*\(""")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val match = pattern.find(executableCode) ?: return source
+        val openBrace = executableCode.indexOf('{', match.range.first)
+        if (openBrace < 0) return source
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
+        if (closeBrace < 0) return source
+        return source.substring(0, match.range.first) + replacement + source.substring(closeBrace + 1)
+    }
+
+    private fun removeDeclaredMethod(source: String, methodName: String): String {
+        val pattern = Regex(
+            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:static\s+)?[\w<>\[\].?,\s]+\s+${Regex.escape(methodName)}\s*\("""
+        )
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val match = pattern.find(executableCode) ?: return source
+        val openBrace = executableCode.indexOf('{', match.range.last)
+        if (openBrace < 0) return source
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
+        if (closeBrace < 0) return source
+        return source.substring(0, match.range.first).trimEnd() + "\n\n" + source.substring(closeBrace + 1).trimStart('\r', '\n')
+    }
+
+    private fun replaceNestedClass(source: String, className: String, replacement: String): String {
+        val pattern = Regex("""public\s+static\s+class\s+${Regex.escape(className)}\b""")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val match = pattern.find(executableCode) ?: return source
+        val openBrace = executableCode.indexOf('{', match.range.first)
+        if (openBrace < 0) return source
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
+        if (closeBrace < 0) return source
+        return source.substring(0, match.range.first) + replacement + source.substring(closeBrace + 1)
+    }
+
+    private fun insertBeforeLastClassBrace(source: String, insertion: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val closeBrace = executableCode.lastIndexOf('}')
+        if (closeBrace < 0) return source
+        return source.substring(0, closeBrace).trimEnd() + "\n" + insertion + "\n" + source.substring(closeBrace)
+    }
+
+    private fun removeImport(source: String, importName: String): String =
+        removeExecutableImport(source, importName)
+
+    private fun packageNameOf(source: String): String =
+        Regex("""(?m)^package\s+([\w.]+)\s*;""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: ""
+
+    private fun hasSimpleTypeReference(source: String, typeName: String): Boolean =
+        Regex("""(?<![.\w$])${Regex.escape(typeName)}(?![\w$])""")
+            .containsMatchIn(source)
+
+    private data class JavaInheritanceType(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val parentType: String?,
+        val imports: Map<String, String>,
+        val wildcardImports: Set<String>,
+        val source: String
+    ) {
+        val fqn: String
+            get() = if (packageName.isBlank()) className else "$packageName.$className"
+    }
+
     private fun migrateEntityLevelAccessorCalls(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
@@ -2777,104 +2936,3 @@ public class ${builder.className} implements RecipeBuilder {
                 .toList()
         }.toSet()
     }
-
-    private fun migrateUseItemOnInteractionResultReturns(projectDir: Path, dryRun: Boolean): List<Change> {
-        val changes = mutableListOf<Change>()
-        val javaFiles = Files.walk(projectDir)
-            .filter { it.extension == "java" }
-            .filter { !projectDir.relativize(it).toString().replace('\\', '/').let { rel ->
-                rel.startsWith("build/") || rel.contains("/build/")
-            }}
-            .toList()
-        val interactionResultHelpers = javaFiles
-            .flatMap { file ->
-                Regex("""(?m)^\s*(?:public|protected|private|default)?\s+(?:static\s+)?InteractionResult\s+([A-Za-z_$][\w$]*)\s*\(""")
-                    .findAll(file.readText())
-                    .map { it.groupValues[1] }
-                    .toList()
-            }
-            .toSet()
-        if (interactionResultHelpers.isEmpty()) return changes
-        val helperPattern = interactionResultHelpers.joinToString("|") { Regex.escape(it) }
-        val helperCall = """(?:(?:this|[A-Za-z_$][\w$]*)\.)?(?:$helperPattern)\([^;\r\n]*\)"""
-        val returnInteractionResult = Regex("""(?m)^([ \t]*)return\s+($helperCall)\s*;\s*$""")
-        val returnTernaryInteractionResult = Regex("""(?m)^([ \t]*)return\s+(.+?)\?\s*($helperCall)\s*:\s*($helperCall)\s*;\s*$""")
-        val compareItemInteractionResult = Regex("""($helperCall)\s*==\s*(?:net\.minecraft\.world\.)?ItemInteractionResult\.([A-Z_]+)""")
-
-        fun wrapInteractionResult(expression: String, indent: String): String =
-            "switch ($expression) {\n" +
-                "${indent}    case SUCCESS -> net.minecraft.world.ItemInteractionResult.SUCCESS;\n" +
-                "${indent}    case SUCCESS_NO_ITEM_USED -> net.minecraft.world.ItemInteractionResult.SUCCESS;\n" +
-                "${indent}    case CONSUME -> net.minecraft.world.ItemInteractionResult.CONSUME;\n" +
-                "${indent}    case CONSUME_PARTIAL -> net.minecraft.world.ItemInteractionResult.CONSUME_PARTIAL;\n" +
-                "${indent}    case FAIL -> net.minecraft.world.ItemInteractionResult.FAIL;\n" +
-                "${indent}    default -> net.minecraft.world.ItemInteractionResult.PASS_TO_DEFAULT_BLOCK_INTERACTION;\n" +
-                "${indent}}"
-
-        for (file in javaFiles) {
-            var content = file.readText()
-            if (!content.contains("ItemInteractionResult useItemOn")) continue
-            val original = content
-            val methodEdits = mutableListOf<Pair<IntRange, String>>()
-            javaMethodRangesIncludingDefault(content)
-                .filter { method ->
-                    method.name == "useItemOn" &&
-                        Regex("""\bItemInteractionResult\s+useItemOn\s*\(""").containsMatchIn(method.header)
-                }
-                .forEach { method ->
-                    var methodText = content.substring(method.range)
-                    methodText = compareItemInteractionResult.replace(methodText) { match ->
-                        "${match.groupValues[1]} == InteractionResult.${match.groupValues[2]}"
-                    }
-                    methodText = returnTernaryInteractionResult.replace(methodText) { match ->
-                        val indent = match.groupValues[1]
-                        val condition = match.groupValues[2].trim()
-                        val left = wrapInteractionResult(match.groupValues[3].trim(), indent)
-                        val right = wrapInteractionResult(match.groupValues[4].trim(), indent)
-                        "${indent}return $condition ? $left : $right;"
-                    }
-                    methodText = returnInteractionResult.replace(methodText) { match ->
-                        val indent = match.groupValues[1]
-                        val expression = match.groupValues[2].trim()
-                        "${indent}return ${wrapInteractionResult(expression, indent)};"
-                    }
-                    if (methodText != content.substring(method.range)) {
-                        methodEdits += method.range to methodText
-                    }
-                }
-            for ((range, replacement) in methodEdits.sortedByDescending { it.first.first }) {
-                content = content.replaceRange(range, replacement)
-            }
-
-            if (content != original) {
-                changes.add(Change(
-                    file = file,
-                    line = 0,
-                    description = "Map helper InteractionResult return values to ItemInteractionResult in useItemOn",
-                    before = "return helperReturningInteractionResult(...);",
-                    after = "return switch (helperReturningInteractionResult(...)) { ... };",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-useitemon-interactionresult-return"
-                ))
-                if (!dryRun) {
-                    file.writeText(content)
-                }
-            }
-        }
-
-        return changes
-    }
-
-    /**
-     * Extract mod-bus @SubscribeEvent methods into static inner classes.
-     * In NeoForge 1.21.1:
-     * - @EventBusSubscriber (no bus specified) = game bus, requires static methods
-     * - Instance registration via modEventBus.register(this) conflicts with @EventBusSubscriber
-     * - Client-only events can't be registered on the server
-     *
-     * This method:
-     * 1. Finds all @SubscribeEvent methods that handle mod-bus events
-     * 2. Separates them into client-only vs common mod-bus events
-     * 3. Creates inner classes with @EventBusSubscriber(bus=MOD) / @EventBusSubscriber(bus=MOD, value=Dist.CLIENT)
-     * 4. Removes modEventBus.register(this) since inner classes auto-register
-    */

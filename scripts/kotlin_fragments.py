@@ -229,7 +229,22 @@ def assemble(target: FragmentTarget) -> None:
 
 
 def check(target: FragmentTarget) -> bool:
-    expected = assembled_bytes(target)
+    fragment_paths = ordered_fragment_paths(target)
+    oversized = []
+    for path in fragment_paths:
+        line_count = len(read_lines(path))
+        if line_count > target.max_lines:
+            oversized.append((path, line_count))
+    if oversized:
+        for path, line_count in oversized:
+            print(
+                f"{target.id}: fragment exceeds {target.max_lines} lines: "
+                f"{relative(path)} ({line_count})",
+                file=sys.stderr,
+            )
+        return False
+
+    expected = b"".join(path.read_bytes() for path in fragment_paths)
     actual = target.source.read_bytes()
     ok = expected == actual
     if ok:

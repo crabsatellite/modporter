@@ -9,6 +9,7 @@ import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.ConstructorDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.body.RecordDeclaration
+import com.github.javaparser.ast.body.TypeDeclaration
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.stmt.ForEachStmt
@@ -37,6 +38,10 @@ internal class RegistrateApiMigration {
 
     private val registryEntryOwner = "com.tterrag.registrate.util.entry.RegistryEntry"
     private val itemProviderEntryOwner = "com.tterrag.registrate.util.entry.ItemProviderEntry"
+    private val registrateFunctionOwner = "com.tterrag.registrate.util.nullness.NonNullFunction"
+    private val deferredHolderOwner = "net.neoforged.neoforge.registries.DeferredHolder"
+    private val resourceKeyOwner = "net.minecraft.resources.ResourceKey"
+    private val registryOwner = "net.minecraft.core.Registry"
     private val removedFunctionalInterfaces = mapOf(
         "net.neoforged.neoforge.common.util.NonNullSupplier" to "java.util.function.Supplier",
         "net.neoforged.neoforge.common.util.NonNullPredicate" to "java.util.function.Predicate",
@@ -75,6 +80,7 @@ internal class RegistrateApiMigration {
             val replacements = mutableListOf<Replacement>()
             var migratedRegistryEntries = 0
             var migratedItemProviderEntries = 0
+            var migratedDeferredHolderFactories = 0
             var migratedFunctionalInterfaces = 0
 
             val removedImports = removedFunctionalInterfaces.filterKeys { owner -> java.hasImport(owner) }
@@ -95,6 +101,58 @@ internal class RegistrateApiMigration {
             }
 
             if (java.hasImport(registryEntryOwner)) {
+                if (java.hasImport(registrateFunctionOwner) &&
+                    java.hasImport(deferredHolderOwner) &&
+                    java.hasImport(resourceKeyOwner) &&
+                    java.hasImport(registryOwner)
+                ) {
+                    java.unit.findAll(MethodDeclaration::class.java).forEach { method ->
+                        val returnType = method.type.asRegistryEntryType() ?: return@forEach
+                        val valueType = returnType.typeArguments.orElse(null)
+                            ?.singleOrNull()
+                            ?.asSimpleTypeName()
+                            ?: return@forEach
+                        val registryBase = resolveTypeVariableBound(method, valueType) ?: return@forEach
+                        if (method.typeParameters.none { it.nameAsString == registryBase }) return@forEach
+
+                        val holderCandidates = method.parameters.flatMap { parameter ->
+                            parameter.findAll(ClassOrInterfaceType::class.java).filter { holder ->
+                                holder.isImportedType(java, deferredHolderOwner) &&
+                                    holder.hasExactTypeArguments(valueType, valueType) &&
+                                    holder.hasRegistrateFactoryContract(java, valueType)
+                            }
+                        }
+                        if (holderCandidates.isEmpty()) return@forEach
+                        if (holderCandidates.size != 1) {
+                            error(
+                                "Registrate DeferredHolder factory migration requires one exact holder contract " +
+                                    "in ${java.file}: ${method.declarationAsString}"
+                            )
+                        }
+                        val registryKeys = method.parameters.count { parameter ->
+                            parameter.type.matchesRegistryKey(java, registryBase)
+                        }
+                        if (registryKeys != 1) {
+                            error(
+                                "Registrate DeferredHolder factory migration requires one exact Registry key " +
+                                    "for $registryBase in ${java.file}: ${method.declarationAsString}"
+                            )
+                        }
+
+                        val holder = holderCandidates.single()
+                        val original = java.text(holder)
+                        val openAngle = original.indexOf('<')
+                        val comma = original.indexOf(',', startIndex = openAngle + 1)
+                        if (openAngle < 0 || comma < 0) {
+                            error("Malformed DeferredHolder type '$original' in ${java.file}")
+                        }
+                        val replacement = original.substring(0, openAngle + 1) + registryBase +
+                            original.substring(comma)
+                        replacements += replacementFor(java, holder, replacement)
+                        migratedDeferredHolderFactories++
+                    }
+                }
+
                 java.unit.findAll(ClassOrInterfaceType::class.java)
                     .filter { it.nameAsString == "RegistryEntry" }
                     .forEach { type ->
@@ -164,6 +222,17 @@ internal class RegistrateApiMigration {
                     ruleId = "build-registrate-itemproviderentry-generics"
                 )
             }
+            if (migratedDeferredHolderFactories > 0) {
+                changes += Change(
+                    file = java.file,
+                    line = 1,
+                    description = "Migrate Registrate entry factories to registry-base/value DeferredHolder generics",
+                    before = "NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<T>>",
+                    after = "NonNullFunction<DeferredHolder<R, T>, ? extends RegistryEntry<R, T>>",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-registrate-deferredholder-factory-generics"
+                )
+            }
             if (migratedFunctionalInterfaces > 0) {
                 changes += Change(
                     file = java.file,
@@ -198,6 +267,45 @@ internal class RegistrateApiMigration {
 
     private fun Type.asRegistryEntryType(): ClassOrInterfaceType? =
         (this as? ClassOrInterfaceType)?.takeIf { it.nameAsString == "RegistryEntry" }
+
+    private fun Type.asSimpleTypeName(): String? =
+        (this as? ClassOrInterfaceType)
+            ?.takeIf { !it.scope.isPresent && !it.typeArguments.map { args -> args.isNotEmpty() }.orElse(false) }
+            ?.nameAsString
+
+    private fun ClassOrInterfaceType.isImportedType(java: ParsedJava, owner: String): Boolean =
+        !scope.isPresent &&
+            nameAsString == owner.substringAfterLast('.') &&
+            java.hasImport(owner) &&
+            java.unit.findAll(TypeDeclaration::class.java)
+                .none { declaration -> declaration.nameAsString == nameAsString }
+
+    private fun ClassOrInterfaceType.hasExactTypeArguments(first: String, second: String): Boolean {
+        val arguments = typeArguments.orElse(null) ?: return false
+        return arguments.size == 2 &&
+            arguments[0].asSimpleTypeName() == first &&
+            arguments[1].asSimpleTypeName() == second
+    }
+
+    private fun ClassOrInterfaceType.hasRegistrateFactoryContract(java: ParsedJava, valueType: String): Boolean {
+        val function = findAncestor(ClassOrInterfaceType::class.java)
+            .filter { ancestor -> ancestor !== this && ancestor.isImportedType(java, registrateFunctionOwner) }
+            .orElse(null)
+            ?: return false
+        val resultType = function.typeArguments.orElse(null)?.getOrNull(1) as? WildcardType ?: return false
+        val entry = resultType.extendedType.orElse(null)?.asRegistryEntryType() ?: return false
+        return entry.isImportedType(java, registryEntryOwner) &&
+            entry.typeArguments.orElse(null)?.singleOrNull()?.asSimpleTypeName() == valueType
+    }
+
+    private fun Type.matchesRegistryKey(java: ParsedJava, registryBase: String): Boolean {
+        val key = this as? ClassOrInterfaceType ?: return false
+        if (!key.isImportedType(java, resourceKeyOwner)) return false
+        val wildcard = key.typeArguments.orElse(null)?.singleOrNull() as? WildcardType ?: return false
+        val registry = wildcard.extendedType.orElse(null) as? ClassOrInterfaceType ?: return false
+        return registry.isImportedType(java, registryOwner) &&
+            registry.typeArguments.orElse(null)?.singleOrNull()?.asSimpleTypeName() == registryBase
+    }
 
     private fun inferRegistryBaseFromMethod(method: MethodDeclaration): String? {
         val returnType = method.type as? ClassOrInterfaceType ?: return null

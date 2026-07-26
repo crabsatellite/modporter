@@ -47,8 +47,10 @@
 
             import com.tterrag.registrate.util.entry.RegistryEntry;
             import com.tterrag.registrate.util.entry.ItemProviderEntry;
+            import com.tterrag.registrate.util.nullness.NonNullFunction;
             import net.minecraft.core.Registry;
             import net.minecraft.resources.ResourceKey;
+            import net.neoforged.neoforge.registries.DeferredHolder;
             import net.neoforged.neoforge.common.util.NonNullConsumer;
             import net.neoforged.neoforge.common.util.NonNullPredicate;
             import net.neoforged.neoforge.common.util.NonNullSupplier;
@@ -74,7 +76,8 @@
 
                 <R, T extends R> RegistryEntry<T> accept(
                     ResourceKey<? extends Registry<R>> registry,
-                    RegistryEntry<T> entry
+                    RegistryEntry<T> entry,
+                    NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<T>> entryFactory
                 ) {
                     return entry;
                 }
@@ -100,6 +103,12 @@
         assertTrue(source.contains("ItemProviderEntry<Item, Item> item"), source)
         assertTrue(source.contains("RegistryEntry<R, T> accept"), source)
         assertTrue(source.contains("RegistryEntry<R, T> entry"), source)
+        assertTrue(
+            source.contains(
+                "NonNullFunction<DeferredHolder<R, T>, ? extends RegistryEntry<R, T>> entryFactory"
+            ),
+            source
+        )
         assertTrue(source.contains("import java.util.function.Supplier;"), source)
         assertTrue(source.contains("import java.util.function.Predicate;"), source)
         assertTrue(source.contains("import java.util.function.Consumer;"), source)
@@ -110,6 +119,75 @@
         assertTrue(source.contains("// NonNullPredicate in documentation"), source)
         assertTrue(changes.any { it.ruleId == "build-registrate-registryentry-generics" })
         assertTrue(changes.any { it.ruleId == "build-registrate-itemproviderentry-generics" })
+        assertTrue(changes.any { it.ruleId == "build-registrate-deferredholder-factory-generics" })
         assertTrue(changes.any { it.ruleId == "build-neoforge-functional-interfaces" })
+    }
+
+    @Test
+    fun `registrate deferred holder factory rejects ambiguous registry keys`() {
+        val projectDir = tempDir.resolve("registrate-ambiguous-registry-key")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("AmbiguousRegistrate.java")
+        source.writeText("""
+            package com.example;
+
+            import com.tterrag.registrate.util.entry.RegistryEntry;
+            import com.tterrag.registrate.util.nullness.NonNullFunction;
+            import net.minecraft.core.Registry;
+            import net.minecraft.resources.ResourceKey;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            class AmbiguousRegistrate {
+                <R, T extends R> RegistryEntry<T> accept(
+                    ResourceKey<? extends Registry<R>> first,
+                    ResourceKey<? extends Registry<R>> second,
+                    NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<T>> entryFactory
+                ) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val error = assertFailsWith<IllegalStateException> {
+            RegistrateApiMigration().migrate(projectDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("requires one exact Registry key"), error.message)
+        assertTrue(source.readText().contains("DeferredHolder<T, T>"))
+    }
+
+    @Test
+    fun `registrate deferred holder factory ignores project shadow types`() {
+        val projectDir = tempDir.resolve("registrate-shadow-types")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("ShadowRegistrate.java")
+        source.writeText("""
+            package com.example;
+
+            import com.tterrag.registrate.util.entry.RegistryEntry;
+            import com.tterrag.registrate.util.nullness.NonNullFunction;
+            import net.minecraft.core.Registry;
+            import net.minecraft.resources.ResourceKey;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            class ShadowRegistrate {
+                static class DeferredHolder<R, T extends R> {}
+
+                <R, T extends R> RegistryEntry<T> accept(
+                    ResourceKey<? extends Registry<R>> registry,
+                    NonNullFunction<DeferredHolder<T, T>, ? extends RegistryEntry<T>> entryFactory
+                ) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val changes = RegistrateApiMigration().migrate(projectDir, dryRun = false)
+        val migrated = source.readText()
+
+        assertTrue(migrated.contains("NonNullFunction<DeferredHolder<T, T>"), migrated)
+        assertFalse(changes.any { it.ruleId == "build-registrate-deferredholder-factory-generics" })
     }
 }

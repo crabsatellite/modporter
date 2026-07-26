@@ -19,5 +19,5 @@
 019-migrate-id-backed-entity-spatial-lookups-in-method.ktfrag
 020-migrate-nitrogen-block-state-recipe-constructors.ktfrag
 021-legacy-record-shaped-crafting-recipe-class-body.ktfrag
-022-migrate-entity-level-accessor-calls.ktfrag
-023-extract-client-only-event-methods.ktfrag
+022-migrate-project-map-entry-value-get-calls.ktfrag
+023-migrate-use-item-on-interaction-result-returns.ktfrag

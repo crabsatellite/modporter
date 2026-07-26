@@ -1,3 +1,104 @@
+
+    private fun migrateUseItemOnInteractionResultReturns(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val javaFiles = Files.walk(projectDir)
+            .filter { it.extension == "java" }
+            .filter { !projectDir.relativize(it).toString().replace('\\', '/').let { rel ->
+                rel.startsWith("build/") || rel.contains("/build/")
+            }}
+            .toList()
+        val interactionResultHelpers = javaFiles
+            .flatMap { file ->
+                Regex("""(?m)^\s*(?:public|protected|private|default)?\s+(?:static\s+)?InteractionResult\s+([A-Za-z_$][\w$]*)\s*\(""")
+                    .findAll(file.readText())
+                    .map { it.groupValues[1] }
+                    .toList()
+            }
+            .toSet()
+        if (interactionResultHelpers.isEmpty()) return changes
+        val helperPattern = interactionResultHelpers.joinToString("|") { Regex.escape(it) }
+        val helperCall = """(?:(?:this|[A-Za-z_$][\w$]*)\.)?(?:$helperPattern)\([^;\r\n]*\)"""
+        val returnInteractionResult = Regex("""(?m)^([ \t]*)return\s+($helperCall)\s*;\s*$""")
+        val returnTernaryInteractionResult = Regex("""(?m)^([ \t]*)return\s+(.+?)\?\s*($helperCall)\s*:\s*($helperCall)\s*;\s*$""")
+        val compareItemInteractionResult = Regex("""($helperCall)\s*==\s*(?:net\.minecraft\.world\.)?ItemInteractionResult\.([A-Z_]+)""")
+
+        fun wrapInteractionResult(expression: String, indent: String): String =
+            "switch ($expression) {\n" +
+                "${indent}    case SUCCESS -> net.minecraft.world.ItemInteractionResult.SUCCESS;\n" +
+                "${indent}    case SUCCESS_NO_ITEM_USED -> net.minecraft.world.ItemInteractionResult.SUCCESS;\n" +
+                "${indent}    case CONSUME -> net.minecraft.world.ItemInteractionResult.CONSUME;\n" +
+                "${indent}    case CONSUME_PARTIAL -> net.minecraft.world.ItemInteractionResult.CONSUME_PARTIAL;\n" +
+                "${indent}    case FAIL -> net.minecraft.world.ItemInteractionResult.FAIL;\n" +
+                "${indent}    default -> net.minecraft.world.ItemInteractionResult.PASS_TO_DEFAULT_BLOCK_INTERACTION;\n" +
+                "${indent}}"
+
+        for (file in javaFiles) {
+            var content = file.readText()
+            if (!content.contains("ItemInteractionResult useItemOn")) continue
+            val original = content
+            val methodEdits = mutableListOf<Pair<IntRange, String>>()
+            javaMethodRangesIncludingDefault(content)
+                .filter { method ->
+                    method.name == "useItemOn" &&
+                        Regex("""\bItemInteractionResult\s+useItemOn\s*\(""").containsMatchIn(method.header)
+                }
+                .forEach { method ->
+                    var methodText = content.substring(method.range)
+                    methodText = compareItemInteractionResult.replace(methodText) { match ->
+                        "${match.groupValues[1]} == InteractionResult.${match.groupValues[2]}"
+                    }
+                    methodText = returnTernaryInteractionResult.replace(methodText) { match ->
+                        val indent = match.groupValues[1]
+                        val condition = match.groupValues[2].trim()
+                        val left = wrapInteractionResult(match.groupValues[3].trim(), indent)
+                        val right = wrapInteractionResult(match.groupValues[4].trim(), indent)
+                        "${indent}return $condition ? $left : $right;"
+                    }
+                    methodText = returnInteractionResult.replace(methodText) { match ->
+                        val indent = match.groupValues[1]
+                        val expression = match.groupValues[2].trim()
+                        "${indent}return ${wrapInteractionResult(expression, indent)};"
+                    }
+                    if (methodText != content.substring(method.range)) {
+                        methodEdits += method.range to methodText
+                    }
+                }
+            for ((range, replacement) in methodEdits.sortedByDescending { it.first.first }) {
+                content = content.replaceRange(range, replacement)
+            }
+
+            if (content != original) {
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Map helper InteractionResult return values to ItemInteractionResult in useItemOn",
+                    before = "return helperReturningInteractionResult(...);",
+                    after = "return switch (helperReturningInteractionResult(...)) { ... };",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-useitemon-interactionresult-return"
+                ))
+                if (!dryRun) {
+                    file.writeText(content)
+                }
+            }
+        }
+
+        return changes
+    }
+
+    /**
+     * Extract mod-bus @SubscribeEvent methods into static inner classes.
+     * In NeoForge 1.21.1:
+     * - @EventBusSubscriber (no bus specified) = game bus, requires static methods
+     * - Instance registration via modEventBus.register(this) conflicts with @EventBusSubscriber
+     * - Client-only events can't be registered on the server
+     *
+     * This method:
+     * 1. Finds all @SubscribeEvent methods that handle mod-bus events
+     * 2. Separates them into client-only vs common mod-bus events
+     * 3. Creates inner classes with @EventBusSubscriber(bus=MOD) / @EventBusSubscriber(bus=MOD, value=Dist.CLIENT)
+     * 4. Removes modEventBus.register(this) since inner classes auto-register
+    */
     private fun extractClientOnlyEventMethods(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")

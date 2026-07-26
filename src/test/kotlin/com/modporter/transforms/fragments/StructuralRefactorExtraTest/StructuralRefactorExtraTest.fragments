@@ -40,3 +40,4 @@
 040-legacy-armor-tick-hooks-migrate-to-inventory-tick-with-armor-guard.ktfrag
 041-enum-delegated-simple-channel-registrations-migrate-as-a-closed-payload-.ktfrag
 042-third-party-record-components-and-event-bus-contracts-are-exact.ktfrag
+043-deferred-holder-generics-use-lexical-and-registry-contracts.ktfrag

@@ -318,4 +318,3 @@
         assertTrue(unrelated.contains("registry.getRegistryKey();"), unrelated)
         assertFalse(unrelated.contains("registry.key();"), unrelated)
     }
-}

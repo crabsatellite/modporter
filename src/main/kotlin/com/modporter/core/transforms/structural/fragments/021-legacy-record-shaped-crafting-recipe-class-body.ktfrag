@@ -2512,7 +2512,7 @@ $writeLines
         source: String,
         deferredHolderRegistryBaseHints: Map<String, String> = emptyMap()
     ): String {
-        var result = source
+        var result = migrateLexicallyBoundDeferredHolderGenerics(source)
         fun replaceExecutable(pattern: Regex, replacement: (MatchResult) -> String) {
             result = replaceExecutableRegex(result, pattern, replacement)
         }
@@ -2575,17 +2575,6 @@ $writeLines
                 Regex("""DeferredHolder\s*<\s*${Regex.escape(itemSubtype)}\s*,\s*${Regex.escape(itemSubtype)}\s*>""")
             ) { "DeferredHolder<Item, $itemSubtype>" }
         }
-        Regex("""<\s*([A-Za-z_$][\w$]*)\s+extends\s+(?:[A-Za-z_$][\w$]*\.)*Block\s*>""")
-            .findAll(maskJavaCommentsAndLiterals(result))
-            .map { it.groupValues[1] }
-            .toSet()
-            .forEach { typeParameter ->
-                replaceExecutable(
-                    Regex(
-                        """DeferredHolder\s*<\s*(?:Item|${Regex.escape(typeParameter)})\s*,\s*${Regex.escape(typeParameter)}\s*>"""
-                    )
-                ) { "DeferredHolder<Block, $typeParameter>" }
-            }
         if (maskJavaCommentsAndLiterals(result).contains("DeferredRegister<Item>")) {
             replaceExecutable(Regex(
                 """(?m)^([ \t]*)(?!@SuppressWarnings\("unchecked"\)\s*\r?\n)\s*private\s+static\s+<V\s+extends\s+Item>\s+DeferredHolder\s*<\s*V\s*,\s*V\s*>\s+register\("""
@@ -2700,6 +2689,82 @@ $writeLines
             result = addImportIfMissing(result, "net.minecraft.world.level.block.Block")
         }
         return result
+    }
+
+    private fun migrateLexicallyBoundDeferredHolderGenerics(source: String): String {
+        val parser = JavaParser(
+            ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+        )
+        val parseResult = parser.parse(source)
+        if (!parseResult.isSuccessful) return source
+        val cu = parseResult.result.orElse(null) ?: return source
+        LexicalPreservingPrinter.setup(cu)
+        var changed = false
+
+        cu.findAll(ClassOrInterfaceType::class.java)
+            .filter {
+                it.hasExactJavaOwner(cu, "net.neoforged.neoforge.registries.DeferredHolder") &&
+                    it.typeArguments.map { args -> args.size }.orElse(0) == 2
+            }
+            .forEach { holder ->
+                val arguments = holder.typeArguments.orElse(null) ?: return@forEach
+                val first = arguments[0].asSimpleUnscopedTypeName() ?: return@forEach
+                val second = arguments[1].asSimpleUnscopedTypeName() ?: return@forEach
+                if (first != second && first != "Item") return@forEach
+                val bound = lexicalTypeParameterBound(holder, second) ?: return@forEach
+                if (!bound.hasExactJavaOwner(cu, "net.minecraft.world.level.block.Block")) return@forEach
+                arguments.set(0, StaticJavaParser.parseClassOrInterfaceType("Block"))
+                changed = true
+            }
+
+        return if (changed) LexicalPreservingPrinter.print(cu) else source
+    }
+
+    private fun lexicalTypeParameterBound(use: Node, name: String): ClassOrInterfaceType? {
+        var current = use.parentNode.orElse(null)
+        while (current != null) {
+            val parameters = when (current) {
+                is CallableDeclaration<*> -> current.typeParameters
+                is ClassOrInterfaceDeclaration -> current.typeParameters
+                is RecordDeclaration -> current.typeParameters
+                else -> null
+            }
+            if (parameters != null) {
+                val parameter = parameters.singleOrNull { it.nameAsString == name }
+                if (parameter != null) {
+                    return parameter.typeBound.singleOrNull()
+                }
+            }
+            current = current.parentNode.orElse(null)
+        }
+        return null
+    }
+
+    private fun com.github.javaparser.ast.type.Type.asSimpleUnscopedTypeName(): String? {
+        if (!isClassOrInterfaceType) return null
+        val type = asClassOrInterfaceType()
+        if (type.scope.isPresent || type.typeArguments.map { it.isNotEmpty() }.orElse(false)) return null
+        return type.nameAsString
+    }
+
+    private fun ClassOrInterfaceType.hasExactJavaOwner(
+        cu: CompilationUnit,
+        qualifiedName: String
+    ): Boolean {
+        val simpleName = qualifiedName.substringAfterLast('.')
+        if (nameAsString != simpleName) return false
+        val packageName = qualifiedName.substringBeforeLast('.')
+        if (scope.isPresent) {
+            return "${scope.get().asString()}.$nameAsString" == qualifiedName
+        }
+        return cu.imports.any { import ->
+            !import.isStatic &&
+                if (import.isAsterisk) {
+                    import.nameAsString == packageName
+                } else {
+                    import.nameAsString == qualifiedName
+                }
+        }
     }
 
     private fun migrateDeferredHolderRegisterBaseGenerics(source: String): String {
@@ -2818,163 +2883,4 @@ $writeLines
         }
         val distinctEdits = edits.distinctBy { it.first }
         return if (distinctEdits.isEmpty()) source else applyStringEdits(source, distinctEdits)
-    }
-
-    private fun migrateProjectMapEntryValueGetCalls(projectDir: Path, dryRun: Boolean): List<Change> {
-        val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return emptyList()
-        val changes = mutableListOf<Change>()
-        Files.walk(srcDir)
-            .filter { it.toString().endsWith(".java") }
-            .forEach { javaFile ->
-                val original = javaFile.readText()
-                val migrated = migrateMapEntryValueGetCalls(original)
-                if (migrated == original) return@forEach
-                if (!dryRun) {
-                    javaFile.writeText(migrated)
-                }
-                changes.add(Change(
-                    file = javaFile,
-                    line = 0,
-                    description = "Migrate Map.Entry value reads away from legacy delegate get calls",
-                    before = "entry.get()",
-                    after = "entry.getValue()",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-map-entry-value-get"
-                ))
-            }
-        return changes
-    }
-
-    private fun hasMapEntryVariableEvidenceBefore(executableCode: String, variable: String, offset: Int): Boolean {
-        val start = (offset - 2000).coerceAtLeast(0)
-        val window = executableCode.substring(start, offset)
-        val variablePattern = Regex.escape(variable)
-        return Regex("""Map\.Entry\b[\s\S]*?\b$variablePattern\s*:""").containsMatchIn(window) ||
-            Regex("""Map\.Entry\b[\s\S]*?\b$variablePattern\s*=""").containsMatchIn(window) ||
-            Regex("""Map\.Entry\b[\s\S]*?\b$variablePattern\s*;""").containsMatchIn(window)
-    }
-
-    private fun migrateFluidHolderConstructorArgumentsSource(
-        source: String,
-        fluidHolderFields: Set<String>,
-        fluidHolderTupleFields: Set<String>
-    ): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("DeferredHolder") && fluidHolderFields.isEmpty() && fluidHolderTupleFields.isEmpty()) return source
-
-        val localFluidHolderFields = Regex(
-            """\b(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*(?:[A-Za-z_$][\w$]*\.)*Fluid\s*,[^;\r\n=]+>\s+([A-Za-z_$][\w$]*)\b"""
-        ).findAll(executableCode)
-            .map { it.groupValues[1] }
-            .toSet()
-        val localFluidHolderTupleFields = Regex(
-            """\b(?:net\.minecraft\.util\.)?Tuple\s*<\s*(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*(?:[A-Za-z_$][\w$]*\.)*Fluid\s*,[^>]+>\s*,\s*(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*(?:[A-Za-z_$][\w$]*\.)*Fluid\s*,[^>]+>\s*>\s+([A-Za-z_$][\w$]*)\b"""
-        ).findAll(executableCode)
-            .map { it.groupValues[1] }
-            .toSet()
-
-        fun unwrapFluidHolderArgument(argument: String): String {
-            val trimmed = argument.trim()
-            if (trimmed.endsWith(".get()") || trimmed.endsWith(".value()")) return argument
-            if (trimmed in localFluidHolderFields || trimmed in fluidHolderFields) {
-                return "${argument.trimEnd()}.get()"
-            }
-            val tupleAccess = Regex("""(.+)\.(getA|getB)\(\)""").matchEntire(trimmed)
-            if (tupleAccess != null) {
-                val receiver = tupleAccess.groupValues[1].trim()
-                if (receiver in localFluidHolderTupleFields || receiver in fluidHolderTupleFields) {
-                    return "${argument.trimEnd()}.get()"
-                }
-            }
-            return argument
-        }
-
-        fun rewriteFirstFluidArgument(className: String, current: String): String =
-            rewriteExecutableJavaNew(current, className) { args ->
-                if (args.isEmpty()) return@rewriteExecutableJavaNew null
-                val migratedFirst = unwrapFluidHolderArgument(args[0])
-                if (migratedFirst == args[0]) return@rewriteExecutableJavaNew null
-                val migratedArgs = args.toMutableList()
-                migratedArgs[0] = migratedFirst
-                "new $className(${migratedArgs.joinToString(", ") { it.trim() }})"
-            }
-
-        var result = source
-        result = rewriteFirstFluidArgument("BucketItem", result)
-        result = rewriteFirstFluidArgument("LiquidBlock", result)
-        result = rewriteFirstFluidArgument("FluidStack", result)
-        return result
-    }
-
-    private fun replaceMethodBody(source: String, methodName: String, replacement: String): String =
-        replaceExecutableMethodBody(source, methodName, replacement)
-
-    private fun replaceExecutableMethodBody(source: String, methodName: String, replacement: String): String {
-        val pattern = Regex("""(?m)(?:@\w+(?:\([^)]*\))?\s*)*(?:public|private|protected)\s+(?:static\s+)?[\w<>\[\].?]+\s+${Regex.escape(methodName)}\s*\(""")
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        val match = pattern.find(executableCode) ?: return source
-        val openBrace = executableCode.indexOf('{', match.range.first)
-        if (openBrace < 0) return source
-        val closeBrace = findMatchingBrace(executableCode, openBrace)
-        if (closeBrace < 0) return source
-        return source.substring(0, match.range.first) + replacement + source.substring(closeBrace + 1)
-    }
-
-    private fun removeDeclaredMethod(source: String, methodName: String): String {
-        val pattern = Regex(
-            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:static\s+)?[\w<>\[\].?,\s]+\s+${Regex.escape(methodName)}\s*\("""
-        )
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        val match = pattern.find(executableCode) ?: return source
-        val openBrace = executableCode.indexOf('{', match.range.last)
-        if (openBrace < 0) return source
-        val closeBrace = findMatchingBrace(executableCode, openBrace)
-        if (closeBrace < 0) return source
-        return source.substring(0, match.range.first).trimEnd() + "\n\n" + source.substring(closeBrace + 1).trimStart('\r', '\n')
-    }
-
-    private fun replaceNestedClass(source: String, className: String, replacement: String): String {
-        val pattern = Regex("""public\s+static\s+class\s+${Regex.escape(className)}\b""")
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        val match = pattern.find(executableCode) ?: return source
-        val openBrace = executableCode.indexOf('{', match.range.first)
-        if (openBrace < 0) return source
-        val closeBrace = findMatchingBrace(executableCode, openBrace)
-        if (closeBrace < 0) return source
-        return source.substring(0, match.range.first) + replacement + source.substring(closeBrace + 1)
-    }
-
-    private fun insertBeforeLastClassBrace(source: String, insertion: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        val closeBrace = executableCode.lastIndexOf('}')
-        if (closeBrace < 0) return source
-        return source.substring(0, closeBrace).trimEnd() + "\n" + insertion + "\n" + source.substring(closeBrace)
-    }
-
-    private fun removeImport(source: String, importName: String): String =
-        removeExecutableImport(source, importName)
-
-    private fun packageNameOf(source: String): String =
-        Regex("""(?m)^package\s+([\w.]+)\s*;""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?: ""
-
-    private fun hasSimpleTypeReference(source: String, typeName: String): Boolean =
-        Regex("""(?<![.\w$])${Regex.escape(typeName)}(?![\w$])""")
-            .containsMatchIn(source)
-
-    private data class JavaInheritanceType(
-        val file: Path,
-        val packageName: String,
-        val className: String,
-        val parentType: String?,
-        val imports: Map<String, String>,
-        val wildcardImports: Set<String>,
-        val source: String
-    ) {
-        val fqn: String
-            get() = if (packageName.isBlank()) className else "$packageName.$className"
     }
