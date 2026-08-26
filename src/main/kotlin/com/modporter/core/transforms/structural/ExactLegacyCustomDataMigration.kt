@@ -14,10 +14,12 @@ import com.github.javaparser.ast.expr.Expression
 import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.ast.expr.SimpleName
+import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.UnaryExpr
 import com.github.javaparser.ast.stmt.BlockStmt
 import com.github.javaparser.ast.stmt.ExpressionStmt
 import com.github.javaparser.ast.stmt.ForEachStmt
+import com.github.javaparser.ast.stmt.IfStmt
 import com.github.javaparser.ast.stmt.Statement
 import com.github.javaparser.ast.stmt.SwitchEntry
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
@@ -180,7 +182,8 @@ internal class ExactLegacyCustomDataMigration {
             if (!verified.isSuccessful) {
                 throw IllegalStateException(
                     "Exact legacy custom-data migration produced invalid Java in $file: " +
-                        verified.problems.joinToString("; ") { it.verboseMessage }
+                        verified.problems.joinToString("; ") { it.verboseMessage } +
+                        "\n$migrated"
                 )
             }
             migratedFiles[file] = migrated
@@ -330,6 +333,15 @@ internal class ExactLegacyCustomDataMigration {
         }
         val nested = directlyScopedCall(use)
         if (nested != null && nested.nameAsString in NESTED_TAG_GETTERS) {
+            if (detachedNestedReadSupported(
+                    nested,
+                    exact,
+                    index,
+                    projectTagEffects
+                )
+            ) {
+                return AliasUse(true)
+            }
             val parentCall = nested.parentNode.orElse(null) as? MethodCallExpr
                 ?: return AliasUse(false)
             val argumentIndex = parentCall.arguments.indexOfIdentity(nested)
@@ -478,7 +490,12 @@ internal class ExactLegacyCustomDataMigration {
         val statement = expression.parentNode.orElse(null) as? ExpressionStmt ?: return null
         if (statement.expression !== expression) return null
         return statement.takeIf {
-            it.parentNode.orElse(null) is BlockStmt || it.parentNode.orElse(null) is SwitchEntry
+            it.parentNode.orElse(null) is BlockStmt ||
+                it.parentNode.orElse(null) is SwitchEntry ||
+                (it.parentNode.orElse(null) as? LambdaExpr)?.body === it ||
+                (it.parentNode.orElse(null) as? IfStmt)?.let { branch ->
+                    branch.thenStmt === it || branch.elseStmt.orElse(null) === it
+                } == true
         }
     }
 
@@ -576,6 +593,31 @@ internal class ExactLegacyCustomDataMigration {
                 val index = parent.statements.indexOfIdentity(anchor)
                 if (index < 0) throw IllegalStateException("Cannot locate switch custom-data mutation statement")
                 parent.statements.add(index + 1, statement)
+            }
+            is LambdaExpr -> {
+                if (parent.body !== anchor) {
+                    throw IllegalStateException("Custom-data mutation is not the lambda body")
+                }
+                val block = BlockStmt()
+                block.addStatement(
+                    StaticJavaParser.parseStatement("${anchor.expression};")
+                )
+                block.addStatement(statement)
+                parent.setBody(block)
+            }
+            is IfStmt -> {
+                val block = BlockStmt()
+                block.addStatement(
+                    StaticJavaParser.parseStatement("${anchor.expression};")
+                )
+                block.addStatement(statement)
+                when {
+                    parent.thenStmt === anchor -> parent.setThenStmt(block)
+                    parent.elseStmt.orElse(null) === anchor -> parent.setElseStmt(block)
+                    else -> throw IllegalStateException(
+                        "Custom-data mutation is not an if branch"
+                    )
+                }
             }
             else -> throw IllegalStateException("Custom-data mutation is outside an ordered statement list")
         }

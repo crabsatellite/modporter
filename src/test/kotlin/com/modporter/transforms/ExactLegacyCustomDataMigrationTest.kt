@@ -153,6 +153,11 @@ class ExactLegacyCustomDataMigrationTest {
                         net.minecraft.world.item.component.CustomData.of(tag)
                     );
                 }
+
+                void lambdaMutation(ItemStack stack) {
+                    CompoundTag tag = stack.getOrCreateTag();
+                    java.util.Optional.of(1).ifPresent(value -> tag.putInt("Count", value));
+                }
             }
             """.trimIndent()
         )
@@ -169,18 +174,25 @@ class ExactLegacyCustomDataMigrationTest {
             migrated
         )
         assertEquals(
-            3,
+            4,
             Regex("""if \(\(tag\)\.isEmpty\(\)\)""").findAll(migrated).count(),
             migrated
         )
         assertEquals(
-            4,
+            5,
             Regex("""CustomData\.of\(tag\)""").findAll(migrated).count(),
             migrated
         )
         assertTrue(migrated.indexOf("tag.putString") < migrated.indexOf("CustomData.of(tag)"), migrated)
         assertTrue(migrated.indexOf("tag.remove") < migrated.lastIndexOf("CustomData.of(tag)"), migrated)
         assertTrue(!migrated.contains("getOrCreateTag"), migrated)
+        assertTrue(
+            Regex(
+                """ifPresent\(value\s*->\s*\{[\s\S]*?tag\.putInt""" +
+                    """\("Count",\s*value\);[\s\S]*?CustomData\.of\(tag\)"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
     }
 
     @Test
@@ -239,6 +251,48 @@ class ExactLegacyCustomDataMigrationTest {
         assertEquals(
             1,
             Regex("""net\.minecraft\.Util\.make\(nextFluid\(\)""").findAll(migrated).count(),
+            migrated
+        )
+    }
+
+    @Test
+    fun `single statement if mutations keep write back inside each branch`() {
+        val source = writeJava(
+            "ConditionalTagMutation.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            class ConditionalTagMutation {
+                void update(ItemStack stack, boolean enabled) {
+                    CompoundTag tag = stack.getOrCreateTag();
+                    if (enabled)
+                        tag.putInt("Count", 1);
+                    else
+                        tag.remove("Count");
+                }
+            }
+            """.trimIndent()
+        )
+
+        ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val migrated = source.readText()
+
+        assertTrue(!migrated.contains("getOrCreateTag"), migrated)
+        assertEquals(
+            2,
+            Regex("""if \(\(tag\)\.isEmpty\(\)\)""").findAll(migrated).count(),
+            migrated
+        )
+        assertTrue(
+            Regex("""if \(enabled\)\s*\{\s*tag\.putInt""")
+                .containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(
+            Regex("""else\s*\{\s*tag\.remove""").containsMatchIn(migrated),
             migrated
         )
     }
