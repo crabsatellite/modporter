@@ -135,6 +135,7 @@ class ExactLegacyCustomDataMigrationTest {
 
             import net.minecraft.nbt.CompoundTag;
             import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.fluids.FluidStack;
 
             class AliasCustomData {
                 int update(ItemStack stack) {
@@ -306,6 +307,7 @@ class ExactLegacyCustomDataMigrationTest {
 
             import net.minecraft.nbt.CompoundTag;
             import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.fluids.FluidStack;
 
             class SetTagCalls {
                 void clear(ItemStack stack) {
@@ -313,6 +315,10 @@ class ExactLegacyCustomDataMigrationTest {
                 }
 
                 void replace(ItemStack stack, CompoundTag value) {
+                    stack.setTag(value);
+                }
+
+                void fluid(FluidStack stack, CompoundTag value) {
                     stack.setTag(value);
                 }
 
@@ -332,7 +338,7 @@ class ExactLegacyCustomDataMigrationTest {
         assertTrue(!migrated.contains("setTag("), migrated)
         assertTrue(!migrated.contains("getOrCreateTag"), migrated)
         assertEquals(
-            3,
+            4,
             Regex("""net\.minecraft\.Util\.make\(stack""").findAll(migrated).count(),
             migrated
         )

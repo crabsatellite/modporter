@@ -70,6 +70,10 @@ class ExactLegacyCustomDataGeneratedCompileTest {
                     stack.setTag(tag);
                 }
 
+                void setFluidTag(FluidStack stack, CompoundTag tag) {
+                    stack.setTag(tag);
+                }
+
                 enum Mode {
                     FIRST
                 }

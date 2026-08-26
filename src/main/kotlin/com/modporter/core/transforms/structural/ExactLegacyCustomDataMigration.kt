@@ -180,7 +180,7 @@ internal class ExactLegacyCustomDataMigration {
                 val kind = kinds.getValue(call)
                 val variable = call.parentNode.orElse(null) as? VariableDeclarator
                 val plan: FilePlan? = if (call.nameAsString == "setTag") {
-                    planSetTag(call, kind)
+                    planSetTag(call)
                 } else if (call.nameAsString == "getOrCreateTagElement") {
                     planElement(call, variable, kind, exact, index, projectTagEffects)
                 } else if (variable != null && variable.initializer.orElse(null) === call) {
@@ -524,11 +524,8 @@ internal class ExactLegacyCustomDataMigration {
         )
     }
 
-    private fun planSetTag(
-        call: MethodCallExpr,
-        kind: ReceiverKind
-    ): SetTagPlan? {
-        if (kind != ReceiverKind.ITEM_STACK || call.arguments.size != 1) return null
+    private fun planSetTag(call: MethodCallExpr): SetTagPlan? {
+        if (call.arguments.size != 1) return null
         val statement = standaloneStatement(call) ?: return null
         return SetTagPlan(
             call = call,
