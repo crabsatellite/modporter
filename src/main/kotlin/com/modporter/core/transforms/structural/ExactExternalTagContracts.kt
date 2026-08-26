@@ -190,16 +190,11 @@ internal object ExactExternalTagContracts {
         "getFloat",
         "getDouble",
         "getString",
-        "getByteArray",
-        "getIntArray",
-        "getLongArray",
         "getBoolean",
         "toString",
         "isEmpty",
         "copy",
         "equals",
-        "hashCode",
-        "accept",
-        "forEach"
+        "hashCode"
     )
 }

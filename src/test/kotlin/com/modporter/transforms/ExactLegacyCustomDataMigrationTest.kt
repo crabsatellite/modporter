@@ -550,6 +550,129 @@ class ExactLegacyCustomDataMigrationTest {
     }
 
     @Test
+    fun `project nested tag views trace aliases casts and lambda effects`() {
+        val source = writeJava(
+            "ProjectNestedTagEffects.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.Tag;
+            import net.minecraft.world.item.ItemStack;
+
+            class ProjectNestedTagEffects {
+                void apply(ItemStack readOnly, ItemStack written) {
+                    CompoundTag first = readOnly.getOrCreateTag();
+                    read(first);
+                    CompoundTag second = written.getOrCreateTag();
+                    mutate(second);
+                }
+
+                static void read(CompoundTag root) {
+                    Tag payload = root.get("Payload");
+                    if (payload != null && payload.getId() == Tag.TAG_COMPOUND) {
+                        CompoundTag nested = (CompoundTag) payload;
+                        nested.getList("Entries", Tag.TAG_COMPOUND).forEach(entry -> {
+                            CompoundTag row = (CompoundTag) entry;
+                            row.getInt("Count");
+                        });
+                    }
+                }
+
+                static void mutate(CompoundTag root) {
+                    root.getList("Entries", Tag.TAG_COMPOUND).forEach(entry ->
+                        ((CompoundTag) entry).putInt("Count", 1)
+                    );
+                }
+            }
+            """.trimIndent()
+        )
+
+        ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val migrated = source.readText()
+
+        assertTrue(!migrated.contains("getOrCreateTag"), migrated)
+        assertEquals(
+            0,
+            Regex("""read\(first\);\s*if \(\(first\)\.isEmpty\(\)\)""")
+                .findAll(migrated)
+                .count(),
+            migrated
+        )
+        assertTrue(
+            Regex("""mutate\(second\);\s*if \(\(second\)\.isEmpty\(\)\)""")
+                .containsMatchIn(migrated),
+            migrated
+        )
+    }
+
+    @Test
+    fun `project nested tag view escape keeps the source graph untouched`() {
+        val source = writeJava(
+            "ProjectNestedTagEscape.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.Tag;
+            import net.minecraft.world.item.ItemStack;
+
+            class ProjectNestedTagEscape {
+                static CompoundTag escaped;
+
+                void apply(ItemStack stack) {
+                    CompoundTag root = stack.getOrCreateTag();
+                    inspect(root);
+                }
+
+                static void inspect(CompoundTag root) {
+                    root.getList("Entries", Tag.TAG_COMPOUND).forEach(entry ->
+                        escaped = (CompoundTag) entry
+                    );
+                }
+            }
+            """.trimIndent()
+        )
+        val original = source.readText()
+
+        val changes = ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+
+        assertTrue(changes.isEmpty())
+        assertEquals(original, source.readText())
+    }
+
+    @Test
+    fun `project mutable primitive array tag views keep the source graph untouched`() {
+        val source = writeJava(
+            "ProjectMutableArrayTagView.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            class ProjectMutableArrayTagView {
+                void apply(ItemStack stack) {
+                    CompoundTag root = stack.getOrCreateTag();
+                    mutate(root);
+                }
+
+                static void mutate(CompoundTag root) {
+                    byte[] bytes = root.getByteArray("Bytes");
+                    bytes[0] = 1;
+                }
+            }
+            """.trimIndent()
+        )
+        val original = source.readText()
+
+        val changes = ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+
+        assertTrue(changes.isEmpty())
+        assertEquals(original, source.readText())
+    }
+
+    @Test
     fun `project method tag escape keeps the source graph untouched`() {
         val source = writeJava(
             "ProjectTagEscape.java",

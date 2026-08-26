@@ -1,10 +1,20 @@
 package com.modporter.core.transforms.structural
 
+import com.github.javaparser.ast.Node
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
+import com.github.javaparser.ast.body.FieldDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.body.Parameter
+import com.github.javaparser.ast.body.VariableDeclarator
+import com.github.javaparser.ast.expr.AssignExpr
+import com.github.javaparser.ast.expr.BinaryExpr
+import com.github.javaparser.ast.expr.CastExpr
+import com.github.javaparser.ast.expr.EnclosedExpr
+import com.github.javaparser.ast.expr.Expression
+import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NameExpr
+import com.github.javaparser.ast.stmt.ForEachStmt
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.IdentityHashMap
@@ -24,13 +34,8 @@ internal class ExactProjectTagEffects(
         UNKNOWN
     }
 
-    private data class ReceiverChain(
-        val outermost: MethodCallExpr,
-        val effect: ExactExternalTagContracts.Effect
-    )
-
     private val methodsByKey: Map<MethodKey, List<MethodDeclaration>>
-    private val states = IdentityHashMap<Parameter, State>()
+    private val states = IdentityHashMap<Node, State>()
 
     init {
         val methods = linkedMapOf<MethodKey, MutableList<MethodDeclaration>>()
@@ -55,9 +60,12 @@ internal class ExactProjectTagEffects(
         call: MethodCallExpr,
         argumentIndex: Int
     ): ExactExternalTagContracts.Effect? {
-        val (method, parameter) = exactTargetParameter(call, argumentIndex) ?: return null
-        if (index.declaredType(parameter.type, method) != COMPOUND_TAG) return null
-        return when (parameterState(method, parameter)) {
+        val (method, parameter) = exactTargetParameter(
+            call,
+            argumentIndex,
+            setOf(COMPOUND_TAG)
+        ) ?: return null
+        return when (bindingState(parameter, ExactJavaSemantics(method.findCompilationUnit().orElseThrow()))) {
             State.READ -> ExactExternalTagContracts.Effect.READ
             State.MUTATE -> ExactExternalTagContracts.Effect.MUTATE
             else -> null
@@ -66,11 +74,12 @@ internal class ExactProjectTagEffects(
 
     private fun exactTargetParameter(
         call: MethodCallExpr,
-        argumentIndex: Int
+        argumentIndex: Int,
+        acceptedTypes: Set<String>
     ): Pair<MethodDeclaration, Parameter>? {
         exactTarget(call)?.let { method ->
             method.parameters.getOrNull(argumentIndex)?.let { parameter ->
-                if (index.declaredType(parameter.type, method) == COMPOUND_TAG) {
+                if (index.declaredType(parameter.type, method) in acceptedTypes) {
                     return method to parameter
                 }
             }
@@ -100,7 +109,7 @@ internal class ExactProjectTagEffects(
             val callerExact = ExactJavaSemantics(callerCu)
             val argumentsMatch = call.arguments.zip(expectedTypes).all { (argument, expected) ->
                 val legacyTagElement = (argument as? MethodCallExpr)?.let { tagCall ->
-                    expected == COMPOUND_TAG &&
+                    expected in acceptedTypes &&
                         tagCall.nameAsString == "getOrCreateTagElement" &&
                         tagCall.arguments.size == 1 &&
                         tagCall.scope.map { ownerExpression ->
@@ -121,7 +130,9 @@ internal class ExactProjectTagEffects(
             if (!argumentsMatch) return@mapNotNull null
             val parameter = nonProviderParameters.getOrNull(argumentIndex)
                 ?: return@mapNotNull null
-            method to parameter
+            (method to parameter).takeIf {
+                index.declaredType(parameter.type, method) in acceptedTypes
+            }
         }
         return expanded.singleOrNull()
     }
@@ -140,92 +151,145 @@ internal class ExactProjectTagEffects(
         }.singleOrNull()
     }
 
-    private fun parameterState(
-        method: MethodDeclaration,
-        parameter: Parameter
-    ): State {
-        states[parameter]?.let { state ->
+    private fun bindingState(binding: Node, exact: ExactJavaSemantics): State {
+        states[binding]?.let { state ->
             return if (state == State.VISITING) State.UNKNOWN else state
         }
-        if (method.body.isEmpty && (method.isAbstract || method.isNative)) {
-            states[parameter] = State.UNKNOWN
+        if (binding is Parameter) {
+            val method = binding.findAncestor(MethodDeclaration::class.java).orElse(null)
+            if (method == null || (method.body.isEmpty && (method.isAbstract || method.isNative))) {
+                states[binding] = State.UNKNOWN
+                return State.UNKNOWN
+            }
+        }
+
+        val uses = when (binding) {
+            is Parameter -> exact.referencesTo(binding)
+            is VariableDeclarator -> exact.referencesTo(binding)
+            else -> emptyList()
+        }
+        if (binding !is Parameter && binding !is VariableDeclarator) {
+            states[binding] = State.UNKNOWN
             return State.UNKNOWN
         }
 
-        states[parameter] = State.VISITING
-        val cu = method.findCompilationUnit().orElse(null) ?: run {
-            states[parameter] = State.UNKNOWN
-            return State.UNKNOWN
-        }
-        val exact = ExactJavaSemantics(cu)
+        states[binding] = State.VISITING
         var mutates = false
-        for (use in exact.referencesTo(parameter)) {
+        for (use in uses) {
+            val assignment = use.parentNode.orElse(null) as? AssignExpr
+            if (assignment?.target === use) continue
             val effect = useEffect(use, exact)
             if (effect == null) {
-                states[parameter] = State.UNKNOWN
+                states[binding] = State.UNKNOWN
                 return State.UNKNOWN
             }
             if (effect == ExactExternalTagContracts.Effect.MUTATE) mutates = true
         }
         return (if (mutates) State.MUTATE else State.READ).also {
-            states[parameter] = it
+            states[binding] = it
         }
     }
 
     private fun useEffect(
         use: NameExpr,
         exact: ExactJavaSemantics
+    ): ExactExternalTagContracts.Effect? = tagValueEffect(use, exact)
+
+    private fun tagValueEffect(
+        expression: Expression,
+        exact: ExactJavaSemantics
     ): ExactExternalTagContracts.Effect? {
-        receiverChain(use)?.let { return it.effect }
-        val direct = directlyScopedCall(use)
-        if (direct != null && direct.nameAsString in NESTED_TAG_GETTERS) {
-            val parentCall = direct.parentNode.orElse(null) as? MethodCallExpr ?: return null
-            val argumentIndex = parentCall.arguments.indexOfIdentity(direct)
-            if (argumentIndex < 0) return null
-            return ExactExternalTagContracts.compoundTagArgumentEffect(
-                parentCall,
-                argumentIndex,
-                exact,
-                index
-            ) ?: compoundTagArgumentEffect(parentCall, argumentIndex)
-        }
-
-        val parentCall = use.parentNode.orElse(null) as? MethodCallExpr ?: return null
-        val argumentIndex = parentCall.arguments.indexOfIdentity(use)
-        if (argumentIndex < 0) return null
-        return ExactExternalTagContracts.compoundTagArgumentEffect(
-            parentCall,
-            argumentIndex,
-            exact,
-            index
-        ) ?: compoundTagArgumentEffect(parentCall, argumentIndex)
-    }
-
-    private fun directlyScopedCall(root: NameExpr): MethodCallExpr? {
-        val call = root.parentNode.orElse(null) as? MethodCallExpr ?: return null
-        return call.takeIf { it.scope.map { scope -> scope === root }.orElse(false) }
-    }
-
-    private fun outermostScopedCall(first: MethodCallExpr): MethodCallExpr {
-        var current = first
+        var current = expression
         while (true) {
-            val parent = current.parentNode.orElse(null) as? MethodCallExpr ?: return current
-            if (!parent.scope.map { it === current }.orElse(false)) return current
-            current = parent
+            current = when (val parent = current.parentNode.orElse(null)) {
+                is CastExpr -> parent.takeIf { it.expression === current } ?: break
+                is EnclosedExpr -> parent.takeIf { it.inner === current } ?: break
+                else -> break
+            }
+        }
+
+        return when (val parent = current.parentNode.orElse(null)) {
+            is MethodCallExpr -> when {
+                parent.scope.map { it === current }.orElse(false) -> when {
+                    parent.nameAsString in NESTED_TAG_GETTERS -> tagValueEffect(parent, exact)
+                    parent.nameAsString == "forEach" -> iterationEffect(parent, exact)
+                    else -> ExactExternalTagContracts.compoundTagReceiverEffect(parent.nameAsString)
+                }
+                else -> {
+                    val argumentIndex = parent.arguments.indexOfIdentity(current)
+                    if (argumentIndex < 0) null else argumentEffect(parent, argumentIndex, exact)
+                }
+            }
+            is VariableDeclarator -> if (parent.initializer.orElse(null) === current) {
+                bindingEffect(parent, exact)
+            } else {
+                null
+            }
+            is AssignExpr -> if (parent.value === current) {
+                val target = parent.target as? NameExpr ?: return null
+                val declaration = exact.declarationOf(target) as? VariableDeclarator ?: return null
+                if (declaration.findAncestor(FieldDeclaration::class.java).isPresent) return null
+                bindingEffect(declaration, exact)
+            } else {
+                null
+            }
+            is ForEachStmt -> if (parent.iterable === current) enhancedForEffect(parent, exact) else null
+            is BinaryExpr -> if (parent.operator in setOf(
+                    BinaryExpr.Operator.EQUALS,
+                    BinaryExpr.Operator.NOT_EQUALS
+                )
+            ) {
+                ExactExternalTagContracts.Effect.READ
+            } else {
+                null
+            }
+            else -> null
         }
     }
 
-    private fun receiverChain(root: NameExpr): ReceiverChain? {
-        val first = directlyScopedCall(root) ?: return null
-        ExactExternalTagContracts.compoundTagReceiverEffect(first.nameAsString)?.let { effect ->
-            return ReceiverChain(outermostScopedCall(first), effect)
-        }
-        if (first.nameAsString !in NESTED_TAG_GETTERS) return null
-        val outermost = outermostScopedCall(first)
-        if (outermost === first) return null
-        val effect = ExactExternalTagContracts.compoundTagReceiverEffect(outermost.nameAsString)
+    private fun bindingEffect(
+        binding: Node,
+        exact: ExactJavaSemantics
+    ): ExactExternalTagContracts.Effect? = when (bindingState(binding, exact)) {
+        State.READ -> ExactExternalTagContracts.Effect.READ
+        State.MUTATE -> ExactExternalTagContracts.Effect.MUTATE
+        else -> null
+    }
+
+    private fun iterationEffect(
+        call: MethodCallExpr,
+        exact: ExactJavaSemantics
+    ): ExactExternalTagContracts.Effect? {
+        if (call.arguments.size != 1) return null
+        val lambda = call.arguments.single() as? LambdaExpr ?: return null
+        val parameter = lambda.parameters.singleOrNull() ?: return null
+        return bindingEffect(parameter, exact)
+    }
+
+    private fun enhancedForEffect(
+        loop: ForEachStmt,
+        exact: ExactJavaSemantics
+    ): ExactExternalTagContracts.Effect? {
+        val variable = loop.variable.variables.singleOrNull() ?: return null
+        return bindingEffect(variable, exact)
+    }
+
+    private fun argumentEffect(
+        call: MethodCallExpr,
+        argumentIndex: Int,
+        exact: ExactJavaSemantics
+    ): ExactExternalTagContracts.Effect? =
+        ExactExternalTagContracts.compoundTagArgumentEffect(call, argumentIndex, exact, index)
+            ?: projectTagArgumentEffect(call, argumentIndex)
+
+    private fun projectTagArgumentEffect(
+        call: MethodCallExpr,
+        argumentIndex: Int
+    ): ExactExternalTagContracts.Effect? {
+        val (method, parameter) = exactTargetParameter(call, argumentIndex, TAG_VALUE_TYPES)
             ?: return null
-        return ReceiverChain(outermost, effect)
+        val cu = method.findCompilationUnit().orElse(null) ?: return null
+        return bindingEffect(parameter, ExactJavaSemantics(cu))
     }
 
     private fun <T> List<T>.indexOfIdentity(target: T): Int =
@@ -233,8 +297,11 @@ internal class ExactProjectTagEffects(
 
     private companion object {
         const val COMPOUND_TAG = "net.minecraft.nbt.CompoundTag"
+        const val LIST_TAG = "net.minecraft.nbt.ListTag"
+        const val TAG = "net.minecraft.nbt.Tag"
         const val HOLDER_LOOKUP_PROVIDER = "net.minecraft.core.HolderLookup.Provider"
         const val ITEM_STACK = "net.minecraft.world.item.ItemStack"
+        val TAG_VALUE_TYPES = setOf(COMPOUND_TAG, LIST_TAG, TAG)
         val NESTED_TAG_GETTERS = setOf("get", "getCompound", "getList")
     }
 }
