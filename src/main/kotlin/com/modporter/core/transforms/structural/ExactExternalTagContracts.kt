@@ -11,13 +11,38 @@ internal object ExactExternalTagContracts {
     fun compoundTagArgumentEffect(
         call: MethodCallExpr,
         argumentIndex: Int,
-        exact: ExactJavaSemantics
+        exact: ExactJavaSemantics,
+        typeIndex: JavaProjectTypeIndex? = null
     ): Effect? {
         if (argumentIndex == 0 &&
             call.nameAsString == "of" &&
             call.scope.map {
                 exact.exactStaticScope(it, "CustomData", CUSTOM_DATA)
             }.orElse(false)
+        ) {
+            return Effect.READ
+        }
+        if (call.scope.map {
+                exact.exactStaticScope(it, "ItemStack", ITEM_STACK)
+            }.orElse(false) &&
+            ((call.nameAsString == "of" && argumentIndex == 0) ||
+                (call.nameAsString == "parseOptional" &&
+                    argumentIndex == call.arguments.lastIndex))
+        ) {
+            return Effect.READ
+        }
+        if (call.nameAsString == "readBlockState" &&
+            argumentIndex == call.arguments.lastIndex &&
+            call.scope.map {
+                exact.exactStaticScope(it, "NbtUtils", NBT_UTILS)
+            }.orElse(false)
+        ) {
+            return Effect.READ
+        }
+        val receiverType = typeIndex?.methodCallReceiverType(call)
+        if (call.nameAsString == "deserializeNBT" &&
+            argumentIndex == call.arguments.lastIndex &&
+            receiverType in ITEM_STACK_HANDLERS
         ) {
             return Effect.READ
         }
@@ -52,6 +77,12 @@ internal object ExactExternalTagContracts {
     private const val CATNIP_NBT_HELPER = "net.createmod.catnip.nbt.NBTHelper"
     private const val CUSTOM_DATA = "net.minecraft.world.item.component.CustomData"
     private const val POTION_UTILS = "net.minecraft.world.item.alchemy.PotionUtils"
+    private const val ITEM_STACK = "net.minecraft.world.item.ItemStack"
+    private const val NBT_UTILS = "net.minecraft.nbt.NbtUtils"
+    private val ITEM_STACK_HANDLERS = setOf(
+        "net.minecraftforge.items.ItemStackHandler",
+        "net.neoforged.neoforge.items.ItemStackHandler"
+    )
     private val POTION_UTILS_READS = setOf(
         "getPotion",
         "getCustomEffects",
@@ -107,6 +138,7 @@ internal object ExactExternalTagContracts {
         "copy",
         "equals",
         "hashCode",
-        "accept"
+        "accept",
+        "forEach"
     )
 }

@@ -17,6 +17,7 @@ import com.github.javaparser.ast.expr.SimpleName
 import com.github.javaparser.ast.expr.UnaryExpr
 import com.github.javaparser.ast.stmt.BlockStmt
 import com.github.javaparser.ast.stmt.ExpressionStmt
+import com.github.javaparser.ast.stmt.ForEachStmt
 import com.github.javaparser.ast.stmt.Statement
 import com.github.javaparser.ast.stmt.SwitchEntry
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
@@ -76,6 +77,11 @@ internal class ExactLegacyCustomDataMigration {
         val mutationStatement: ExpressionStmt? = null
     )
 
+    private data class ReceiverChain(
+        val outermost: MethodCallExpr,
+        val effect: ExactExternalTagContracts.Effect
+    )
+
     fun migrate(projectDir: Path, dryRun: Boolean): List<Change> {
         val sourceRoot = projectDir.resolve("src/main/java")
         if (!Files.isDirectory(sourceRoot)) return emptyList()
@@ -113,9 +119,9 @@ internal class ExactLegacyCustomDataMigration {
                 val kind = kinds.getValue(call)
                 val variable = call.parentNode.orElse(null) as? VariableDeclarator
                 val plan: FilePlan? = if (variable != null && variable.initializer.orElse(null) === call) {
-                    planAlias(call, variable, kind, exact, projectTagEffects)
+                    planAlias(call, variable, kind, exact, index, projectTagEffects)
                 } else {
-                    planDirect(call, kind, exact, projectTagEffects)
+                    planDirect(call, kind, exact, index, projectTagEffects)
                 }
                 when (plan) {
                     is AliasPlan -> aliasPlans += plan
@@ -199,6 +205,7 @@ internal class ExactLegacyCustomDataMigration {
         variable: VariableDeclarator,
         kind: ReceiverKind,
         exact: ExactJavaSemantics,
+        index: JavaProjectTypeIndex,
         projectTagEffects: ExactProjectTagEffects
     ): AliasPlan? {
         if (!exact.exactTypeReference(
@@ -225,7 +232,9 @@ internal class ExactLegacyCustomDataMigration {
         }
 
         val uses = exact.referencesTo(variable)
-        val classified = uses.map { classifyAliasUse(it, exact, projectTagEffects) }
+        val classified = uses.map {
+            classifyAliasUse(it, exact, index, projectTagEffects)
+        }
         if (classified.any { !it.supported }) return null
         return AliasPlan(
             call = call,
@@ -242,14 +251,15 @@ internal class ExactLegacyCustomDataMigration {
         call: MethodCallExpr,
         kind: ReceiverKind,
         exact: ExactJavaSemantics,
+        index: JavaProjectTypeIndex,
         projectTagEffects: ExactProjectTagEffects
     ): DirectPlan? {
         val receiver = call.scope.get()
-        val rooted = rootedCall(call)
-        if (rooted != null && rooted !== call) {
-            return when (ExactExternalTagContracts.compoundTagReceiverEffect(rooted.nameAsString)) {
+        val chain = receiverChain(call)
+        if (chain != null) {
+            return when (chain.effect) {
                 ExactExternalTagContracts.Effect.MUTATE -> {
-                    val statement = standaloneStatement(rooted) ?: return null
+                    val statement = standaloneStatement(chain.outermost) ?: return null
                     val tagName = uniqueName(call, "modPorterCustomDataTag")
                     val ownerName = uniqueName(call, "modPorterCustomDataOwner")
                     DirectMutationPlan(
@@ -259,12 +269,18 @@ internal class ExactLegacyCustomDataMigration {
                         statement,
                         ownerName,
                         tagName,
-                        expressionWithTag(rooted, call, tagName)
+                        expressionWithTag(chain.outermost, call, tagName)
                     )
                 }
                 ExactExternalTagContracts.Effect.READ -> DirectReadPlan(call, receiver)
-                null -> null
             }
+        }
+        val direct = directlyScopedCall(call)
+        if (direct != null &&
+            direct.nameAsString in NESTED_TAG_GETTERS &&
+            detachedNestedReadSupported(direct, exact, index, projectTagEffects)
+        ) {
+            return DirectReadPlan(call, receiver)
         }
 
         val parentCall = call.parentNode.orElse(null) as? MethodCallExpr
@@ -273,7 +289,8 @@ internal class ExactLegacyCustomDataMigration {
             val externalEffect = ExactExternalTagContracts.compoundTagArgumentEffect(
                 parentCall,
                 argumentIndex,
-                exact
+                exact,
+                index
             ) ?: projectTagEffects.compoundTagArgumentEffect(parentCall, argumentIndex)
             return when {
                 externalEffect == ExactExternalTagContracts.Effect.READ -> DirectReadPlan(call, receiver)
@@ -300,14 +317,36 @@ internal class ExactLegacyCustomDataMigration {
     private fun classifyAliasUse(
         use: NameExpr,
         exact: ExactJavaSemantics,
+        index: JavaProjectTypeIndex,
         projectTagEffects: ExactProjectTagEffects
     ): AliasUse {
-        val rooted = rootedCall(use)
-        if (rooted != null) {
-            return when (ExactExternalTagContracts.compoundTagReceiverEffect(rooted.nameAsString)) {
+        val chain = receiverChain(use)
+        if (chain != null) {
+            return when (chain.effect) {
                 ExactExternalTagContracts.Effect.MUTATE ->
-                    AliasUse(true, standaloneStatement(rooted) ?: return AliasUse(false))
+                    AliasUse(true, standaloneStatement(chain.outermost) ?: return AliasUse(false))
                 ExactExternalTagContracts.Effect.READ -> AliasUse(true)
+            }
+        }
+        val nested = directlyScopedCall(use)
+        if (nested != null && nested.nameAsString in NESTED_TAG_GETTERS) {
+            val parentCall = nested.parentNode.orElse(null) as? MethodCallExpr
+                ?: return AliasUse(false)
+            val argumentIndex = parentCall.arguments.indexOfIdentity(nested)
+            if (argumentIndex < 0) return AliasUse(false)
+            return when (argumentEffect(
+                parentCall,
+                argumentIndex,
+                exact,
+                index,
+                projectTagEffects
+            )) {
+                ExactExternalTagContracts.Effect.READ -> AliasUse(true)
+                ExactExternalTagContracts.Effect.MUTATE ->
+                    AliasUse(
+                        true,
+                        standaloneStatement(parentCall) ?: return AliasUse(false)
+                    )
                 null -> AliasUse(false)
             }
         }
@@ -318,7 +357,8 @@ internal class ExactLegacyCustomDataMigration {
             val externalEffect = ExactExternalTagContracts.compoundTagArgumentEffect(
                 parentCall,
                 argumentIndex,
-                exact
+                exact,
+                index
             ) ?: projectTagEffects.compoundTagArgumentEffect(parentCall, argumentIndex)
             return when {
                 externalEffect == ExactExternalTagContracts.Effect.READ -> AliasUse(true)
@@ -330,15 +370,109 @@ internal class ExactLegacyCustomDataMigration {
         return AliasUse(false)
     }
 
-    private fun rootedCall(root: Node): MethodCallExpr? {
-        var current = root.parentNode.orElse(null) as? MethodCallExpr ?: return null
-        if (!current.scope.map { it === root }.orElse(false)) return null
+    private fun directlyScopedCall(root: Node): MethodCallExpr? {
+        val call = root.parentNode.orElse(null) as? MethodCallExpr ?: return null
+        return call.takeIf { it.scope.map { scope -> scope === root }.orElse(false) }
+    }
+
+    private fun outermostScopedCall(first: MethodCallExpr): MethodCallExpr {
+        var current = first
         while (true) {
             val parent = current.parentNode.orElse(null) as? MethodCallExpr ?: return current
             if (!parent.scope.map { it === current }.orElse(false)) return current
             current = parent
         }
     }
+
+    private fun receiverChain(root: Node): ReceiverChain? {
+        val first = directlyScopedCall(root) ?: return null
+        ExactExternalTagContracts.compoundTagReceiverEffect(first.nameAsString)?.let { effect ->
+            return ReceiverChain(outermostScopedCall(first), effect)
+        }
+        if (first.nameAsString !in NESTED_TAG_GETTERS) return null
+        val outermost = outermostScopedCall(first)
+        if (outermost === first) return null
+        val effect = ExactExternalTagContracts.compoundTagReceiverEffect(outermost.nameAsString)
+            ?: return null
+        return ReceiverChain(outermost, effect)
+    }
+
+    private fun detachedNestedReadSupported(
+        nestedCall: MethodCallExpr,
+        exact: ExactJavaSemantics,
+        index: JavaProjectTypeIndex,
+        projectTagEffects: ExactProjectTagEffects
+    ): Boolean {
+        val variable = nestedCall.parentNode.orElse(null) as? VariableDeclarator ?: return false
+        if (variable.initializer.orElse(null) !== nestedCall ||
+            !(exact.exactTypeReference(
+                variable.typeAsString,
+                "CompoundTag",
+                "net.minecraft.nbt.CompoundTag"
+            ) || exact.exactTypeReference(
+                variable.typeAsString,
+                "ListTag",
+                "net.minecraft.nbt.ListTag"
+            ))
+        ) {
+            return false
+        }
+        return exact.referencesTo(variable).all { use ->
+            detachedValueUseIsRead(use, exact, index, projectTagEffects)
+        }
+    }
+
+    private fun detachedValueUseIsRead(
+        use: NameExpr,
+        exact: ExactJavaSemantics,
+        index: JavaProjectTypeIndex,
+        projectTagEffects: ExactProjectTagEffects
+    ): Boolean {
+        val forEach = use.parentNode.orElse(null) as? ForEachStmt
+        if (forEach != null && forEach.iterable === use) return true
+
+        receiverChain(use)?.let {
+            return it.effect == ExactExternalTagContracts.Effect.READ
+        }
+        val nested = directlyScopedCall(use)
+        if (nested != null && nested.nameAsString in NESTED_TAG_GETTERS) {
+            val parentCall = nested.parentNode.orElse(null) as? MethodCallExpr ?: return false
+            val argumentIndex = parentCall.arguments.indexOfIdentity(nested)
+            if (argumentIndex < 0) return false
+            return argumentEffect(
+                parentCall,
+                argumentIndex,
+                exact,
+                index,
+                projectTagEffects
+            ) == ExactExternalTagContracts.Effect.READ
+        }
+
+        val parentCall = use.parentNode.orElse(null) as? MethodCallExpr ?: return false
+        val argumentIndex = parentCall.arguments.indexOfIdentity(use)
+        if (argumentIndex < 0) return false
+        return argumentEffect(
+            parentCall,
+            argumentIndex,
+            exact,
+            index,
+            projectTagEffects
+        ) == ExactExternalTagContracts.Effect.READ
+    }
+
+    private fun argumentEffect(
+        call: MethodCallExpr,
+        argumentIndex: Int,
+        exact: ExactJavaSemantics,
+        index: JavaProjectTypeIndex,
+        projectTagEffects: ExactProjectTagEffects
+    ): ExactExternalTagContracts.Effect? =
+        ExactExternalTagContracts.compoundTagArgumentEffect(
+            call,
+            argumentIndex,
+            exact,
+            index
+        ) ?: projectTagEffects.compoundTagArgumentEffect(call, argumentIndex)
 
     private fun standaloneStatement(expression: Expression): ExpressionStmt? {
         val statement = expression.parentNode.orElse(null) as? ExpressionStmt ?: return null
@@ -493,6 +627,7 @@ internal class ExactLegacyCustomDataMigration {
             "net.minecraftforge.fluids.FluidStack",
             TARGET_FLUID_STACK
         )
+        val NESTED_TAG_GETTERS = setOf("get", "getCompound", "getList")
         const val DATA_COMPONENTS = "net.minecraft.core.component.DataComponents"
         const val CUSTOM_DATA = "net.minecraft.world.item.component.CustomData"
     }

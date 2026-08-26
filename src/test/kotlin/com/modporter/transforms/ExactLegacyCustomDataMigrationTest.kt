@@ -353,6 +353,51 @@ class ExactLegacyCustomDataMigrationTest {
     }
 
     @Test
+    fun `nested compound and list values migrate only when every use is read only`() {
+        val source = writeJava(
+            "NestedTagReads.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.ListTag;
+            import net.minecraft.nbt.Tag;
+            import net.minecraft.world.item.ItemStack;
+
+            class NestedTagReads {
+                int child(ItemStack stack) {
+                    CompoundTag child = stack.getOrCreateTag().getCompound("Child");
+                    return child.getInt("Count");
+                }
+
+                int list(ItemStack stack) {
+                    ListTag values = stack.getOrCreateTag().getList("Values", Tag.TAG_COMPOUND);
+                    int count = 0;
+                    for (Tag value : values) {
+                        count++;
+                    }
+                    return count;
+                }
+
+                ItemStack parsed(ItemStack stack) {
+                    CompoundTag root = stack.getOrCreateTag();
+                    return ItemStack.of(root.getCompound("Stored"));
+                }
+            }
+            """.trimIndent()
+        )
+
+        val changes = ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val migrated = source.readText()
+
+        assertEquals(1, changes.size)
+        assertTrue(!migrated.contains("getOrCreateTag"), migrated)
+        assertTrue(migrated.contains(".copyTag().getCompound(\"Child\")"), migrated)
+        assertTrue(migrated.contains(".copyTag().getList(\"Values\""), migrated)
+        assertTrue(migrated.contains("ItemStack.of(root.getCompound(\"Stored\"))"), migrated)
+    }
+
+    @Test
     fun `receiver reassignment snapshots the original owner while lookalikes remain untouched`() {
         val source = writeJava(
             "AmbiguousCustomData.java",

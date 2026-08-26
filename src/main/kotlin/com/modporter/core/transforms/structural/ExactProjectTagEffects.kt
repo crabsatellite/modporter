@@ -24,6 +24,11 @@ internal class ExactProjectTagEffects(
         UNKNOWN
     }
 
+    private data class ReceiverChain(
+        val outermost: MethodCallExpr,
+        val effect: ExactExternalTagContracts.Effect
+    )
+
     private val methodsByKey: Map<MethodKey, List<MethodDeclaration>>
     private val states = IdentityHashMap<Parameter, State>()
 
@@ -110,17 +115,17 @@ internal class ExactProjectTagEffects(
         use: NameExpr,
         exact: ExactJavaSemantics
     ): ExactExternalTagContracts.Effect? {
-        val rooted = rootedCall(use)
-        if (rooted != null) {
-            ExactExternalTagContracts.compoundTagReceiverEffect(rooted.nameAsString)
-                ?.let { return it }
-            val parentCall = rooted.parentNode.orElse(null) as? MethodCallExpr ?: return null
-            val argumentIndex = parentCall.arguments.indexOfIdentity(rooted)
+        receiverChain(use)?.let { return it.effect }
+        val direct = directlyScopedCall(use)
+        if (direct != null && direct.nameAsString in NESTED_TAG_GETTERS) {
+            val parentCall = direct.parentNode.orElse(null) as? MethodCallExpr ?: return null
+            val argumentIndex = parentCall.arguments.indexOfIdentity(direct)
             if (argumentIndex < 0) return null
             return ExactExternalTagContracts.compoundTagArgumentEffect(
                 parentCall,
                 argumentIndex,
-                exact
+                exact,
+                index
             ) ?: compoundTagArgumentEffect(parentCall, argumentIndex)
         }
 
@@ -130,13 +135,18 @@ internal class ExactProjectTagEffects(
         return ExactExternalTagContracts.compoundTagArgumentEffect(
             parentCall,
             argumentIndex,
-            exact
+            exact,
+            index
         ) ?: compoundTagArgumentEffect(parentCall, argumentIndex)
     }
 
-    private fun rootedCall(root: NameExpr): MethodCallExpr? {
-        var current = root.parentNode.orElse(null) as? MethodCallExpr ?: return null
-        if (!current.scope.map { it === root }.orElse(false)) return null
+    private fun directlyScopedCall(root: NameExpr): MethodCallExpr? {
+        val call = root.parentNode.orElse(null) as? MethodCallExpr ?: return null
+        return call.takeIf { it.scope.map { scope -> scope === root }.orElse(false) }
+    }
+
+    private fun outermostScopedCall(first: MethodCallExpr): MethodCallExpr {
+        var current = first
         while (true) {
             val parent = current.parentNode.orElse(null) as? MethodCallExpr ?: return current
             if (!parent.scope.map { it === current }.orElse(false)) return current
@@ -144,10 +154,24 @@ internal class ExactProjectTagEffects(
         }
     }
 
+    private fun receiverChain(root: NameExpr): ReceiverChain? {
+        val first = directlyScopedCall(root) ?: return null
+        ExactExternalTagContracts.compoundTagReceiverEffect(first.nameAsString)?.let { effect ->
+            return ReceiverChain(outermostScopedCall(first), effect)
+        }
+        if (first.nameAsString !in NESTED_TAG_GETTERS) return null
+        val outermost = outermostScopedCall(first)
+        if (outermost === first) return null
+        val effect = ExactExternalTagContracts.compoundTagReceiverEffect(outermost.nameAsString)
+            ?: return null
+        return ReceiverChain(outermost, effect)
+    }
+
     private fun <T> List<T>.indexOfIdentity(target: T): Int =
         indexOfFirst { it === target }
 
     private companion object {
         const val COMPOUND_TAG = "net.minecraft.nbt.CompoundTag"
+        val NESTED_TAG_GETTERS = setOf("get", "getCompound", "getList")
     }
 }
