@@ -24286,7 +24286,13 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
         assertTrue(transformed.contains("stack.set(net.minecraft.core.component.DataComponents.BLOCK_ENTITY_DATA, net.minecraft.world.item.component.CustomData.of(blockEntityTag));"))
         assertTrue(transformed.contains("CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, stack, tag -> tag.put(TAG_MARKER, ByteTag.valueOf((byte) 1)));"))
-        assertTrue(transformed.contains("stack.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(blockEntityTag));"))
+        assertTrue(transformed.contains("modPorterCustomDataValue = blockEntityTag;"), transformed)
+        assertTrue(transformed.contains(".remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);"), transformed)
+        assertTrue(
+            Regex("""\.set\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA, net\.minecraft\.world\.item\.component\.CustomData\.of\(modPorterCustomDataValue\d*\)\);""")
+                .containsMatchIn(transformed),
+            transformed
+        )
         assertTrue(transformed.contains("registry.get(Enchantments.SILK_TOUCH)"))
         assertTrue(transformed.contains("EnchantmentHelper.getItemEnchantmentLevel(holder, tool)"))
         assertTrue(transformed.contains("super.finalizeSpawn(accessor, difficulty, reason, spawnDataIn)"))
@@ -26587,7 +26593,17 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
         assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, source.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
         assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, curiosSlotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
-        assertTrue(migrated.contains("target.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, slotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
+        assertTrue(
+            Regex("""modPorterCustomDataValue\d* = slotResult\.stack\(\)\.getOrDefault\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA, net\.minecraft\.world\.item\.component\.CustomData\.EMPTY\)\.copyTag\(\);""")
+                .containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(migrated.contains(".remove(net.minecraft.core.component.DataComponents.CUSTOM_DATA);"), migrated)
+        assertTrue(
+            Regex("""\.set\(net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA, net\.minecraft\.world\.item\.component\.CustomData\.of\(modPorterCustomDataValue\d*\)\);""")
+                .containsMatchIn(migrated),
+            migrated
+        )
         assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, slotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
         assertFalse(migrated.contains("CustomData.of(source.getTag())"), migrated)
         assertFalse(migrated.contains("CustomData.of(slotResult.stack().getTag())"), migrated)

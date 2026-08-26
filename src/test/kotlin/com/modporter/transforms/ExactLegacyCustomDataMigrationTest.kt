@@ -635,6 +635,14 @@ class ExactLegacyCustomDataMigrationTest {
                         entry -> entry
                     );
                 }
+
+                void catnipIteration(ItemStack stack) {
+                    CompoundTag root = stack.getOrCreateTag();
+                    NBTHelper.iterateCompoundList(
+                        root.getList("Entries", Tag.TAG_COMPOUND),
+                        entry -> entry.getInt("Count")
+                    );
+                }
             }
             """.trimIndent()
         )
