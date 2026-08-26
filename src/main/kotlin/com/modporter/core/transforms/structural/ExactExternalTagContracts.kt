@@ -107,7 +107,7 @@ internal object ExactExternalTagContracts {
             return null
         }
         return when (call.nameAsString) {
-            "readEnum" -> Effect.READ
+            "readEnum", "readCompoundList" -> Effect.READ
             "writeEnum" -> Effect.MUTATE
             else -> null
         }

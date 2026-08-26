@@ -10,6 +10,8 @@ import com.github.javaparser.ast.body.FieldDeclaration
 import com.github.javaparser.ast.body.Parameter
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.AssignExpr
+import com.github.javaparser.ast.expr.CastExpr
+import com.github.javaparser.ast.expr.EnclosedExpr
 import com.github.javaparser.ast.expr.Expression
 import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NameExpr
@@ -589,10 +591,8 @@ internal class ExactLegacyCustomDataMigration {
             ) {
                 return AliasUse(true)
             }
-            val parentCall = nested.parentNode.orElse(null) as? MethodCallExpr
+            val (parentCall, argumentIndex) = argumentConsumer(nested)
                 ?: return AliasUse(false)
-            val argumentIndex = parentCall.arguments.indexOfIdentity(nested)
-            if (argumentIndex < 0) return AliasUse(false)
             return when (argumentEffect(
                 parentCall,
                 argumentIndex,
@@ -695,9 +695,7 @@ internal class ExactLegacyCustomDataMigration {
         }
         val nested = directlyScopedCall(use)
         if (nested != null && nested.nameAsString in NESTED_TAG_GETTERS) {
-            val parentCall = nested.parentNode.orElse(null) as? MethodCallExpr ?: return false
-            val argumentIndex = parentCall.arguments.indexOfIdentity(nested)
-            if (argumentIndex < 0) return false
+            val (parentCall, argumentIndex) = argumentConsumer(nested) ?: return false
             return argumentEffect(
                 parentCall,
                 argumentIndex,
@@ -732,6 +730,20 @@ internal class ExactLegacyCustomDataMigration {
             exact,
             index
         ) ?: projectTagEffects.compoundTagArgumentEffect(call, argumentIndex)
+
+    private fun argumentConsumer(expression: Expression): Pair<MethodCallExpr, Int>? {
+        var current: Node = expression
+        while (true) {
+            current = when (val parent = current.parentNode.orElse(null)) {
+                is CastExpr -> parent.takeIf { it.expression === current } ?: break
+                is EnclosedExpr -> parent.takeIf { it.inner === current } ?: break
+                else -> break
+            }
+        }
+        val call = current.parentNode.orElse(null) as? MethodCallExpr ?: return null
+        val argumentIndex = call.arguments.indexOfIdentity(current as? Expression ?: return null)
+        return (call to argumentIndex).takeIf { argumentIndex >= 0 }
+    }
 
     private fun standaloneStatement(expression: Expression): ExpressionStmt? {
         val statement = expression.parentNode.orElse(null) as? ExpressionStmt ?: return null

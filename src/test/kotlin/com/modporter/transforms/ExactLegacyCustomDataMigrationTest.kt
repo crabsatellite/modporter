@@ -536,6 +536,7 @@ class ExactLegacyCustomDataMigrationTest {
             import net.minecraft.nbt.ListTag;
             import net.minecraft.nbt.Tag;
             import net.minecraft.world.item.ItemStack;
+            import net.createmod.catnip.nbt.NBTHelper;
             import java.util.Objects;
 
             class NestedTagReads {
@@ -562,6 +563,24 @@ class ExactLegacyCustomDataMigrationTest {
                     CompoundTag root = stack.getOrCreateTag();
                     return Objects.equals(new CompoundTag(), root.get("Stored"));
                 }
+
+                int casted(ItemStack stack) {
+                    ListTag values =
+                        stack.getOrCreateTag().getList("Values", Tag.TAG_COMPOUND);
+                    return read((CompoundTag) values.get(0));
+                }
+
+                static int read(CompoundTag tag) {
+                    return tag.getInt("Count");
+                }
+
+                Object catnip(ItemStack stack) {
+                    CompoundTag root = stack.getOrCreateTag();
+                    return NBTHelper.readCompoundList(
+                        root.getList("Entries", Tag.TAG_COMPOUND),
+                        entry -> entry
+                    );
+                }
             }
             """.trimIndent()
         )
@@ -574,6 +593,56 @@ class ExactLegacyCustomDataMigrationTest {
         assertTrue(migrated.contains(".copyTag().getCompound(\"Child\")"), migrated)
         assertTrue(migrated.contains(".copyTag().getList(\"Values\""), migrated)
         assertTrue(migrated.contains("ItemStack.of(root.getCompound(\"Stored\"))"), migrated)
+    }
+
+    @Test
+    fun `project generic inherited fields preserve their exact item stack type`() {
+        writeJava(
+            "GenericHolder.java",
+            """
+            package com.example;
+
+            class GenericHolder<T> {
+                public T contentHolder;
+            }
+            """.trimIndent()
+        )
+        writeJava(
+            "ItemMenu.java",
+            """
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            class ItemMenu extends GenericHolder<ItemStack> {
+            }
+            """.trimIndent()
+        )
+        val source = writeJava(
+            "GenericHolderScreen.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            class GenericHolderScreen {
+                GenericHolderScreen(ItemMenu menu) {
+                    CompoundTag tag =
+                        menu.contentHolder.getOrCreateTag().getCompound("Stored");
+                    if (!tag.isEmpty()) {
+                        tag.getInt("Count");
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+
+        val changes = ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val migrated = source.readText()
+
+        assertEquals(1, changes.size, migrated)
+        assertTrue(!migrated.contains("getOrCreateTag"), migrated)
+        assertTrue(migrated.contains("menu.contentHolder).getOrDefault"), migrated)
     }
 
     @Test
