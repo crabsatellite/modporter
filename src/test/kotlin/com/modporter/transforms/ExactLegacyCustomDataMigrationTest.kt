@@ -99,7 +99,8 @@ class ExactLegacyCustomDataMigrationTest {
         )
         assertTrue(
             Regex(
-                """net\.minecraft\.Util\.make\(\(fluid\)\.getOrDefault\(""" +
+                """net\.minecraft\.Util\.make\(fluid,\s*modPorterCustomDataOwner\s*->\s*""" +
+                    """net\.minecraft\.Util\.make\(\(modPorterCustomDataOwner\)\.getOrDefault\(""" +
                     """net\.minecraft\.core\.component\.DataComponents\.CUSTOM_DATA,\s*""" +
                     """net\.minecraft\.world\.item\.component\.CustomData\.EMPTY\)\.copyTag\(\),\s*""" +
                     """modPorterCustomDataTag\s*->"""
@@ -109,7 +110,7 @@ class ExactLegacyCustomDataMigrationTest {
         assertTrue(migrated.contains("NBTHelper.writeEnum(modPorterCustomDataTag, \"Mode\", mode);"), migrated)
         assertTrue(
             migrated.contains(
-                "(fluid).set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, " +
+                "(modPorterCustomDataOwner).set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, " +
                     "net.minecraft.world.item.component.CustomData.of(modPorterCustomDataTag))"
             ),
             migrated
@@ -143,6 +144,15 @@ class ExactLegacyCustomDataMigrationTest {
                     tag.remove("Name");
                     return result;
                 }
+
+                void explicitWriteBack(ItemStack stack) {
+                    CompoundTag tag = stack.getOrCreateTag();
+                    tag.putInt("Count", 1);
+                    stack.set(
+                        net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+                        net.minecraft.world.item.component.CustomData.of(tag)
+                    );
+                }
             }
             """.trimIndent()
         )
@@ -159,17 +169,78 @@ class ExactLegacyCustomDataMigrationTest {
             migrated
         )
         assertEquals(
-            2,
+            3,
             Regex("""if \(\(tag\)\.isEmpty\(\)\)""").findAll(migrated).count(),
             migrated
         )
         assertEquals(
-            2,
+            4,
             Regex("""CustomData\.of\(tag\)""").findAll(migrated).count(),
             migrated
         )
         assertTrue(migrated.indexOf("tag.putString") < migrated.indexOf("CustomData.of(tag)"), migrated)
         assertTrue(migrated.indexOf("tag.remove") < migrated.lastIndexOf("CustomData.of(tag)"), migrated)
+        assertTrue(!migrated.contains("getOrCreateTag"), migrated)
+    }
+
+    @Test
+    fun `member aliases and fluid call receivers are evaluated once through owner snapshots`() {
+        val source = writeJava(
+            "OwnerSnapshots.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            class OwnerSnapshots {
+                ItemStack item;
+
+                void fieldAlias() {
+                    CompoundTag tag = item.getOrCreateTag();
+                    tag.putInt("Count", 1);
+                }
+
+                void returnedFluid() {
+                    nextFluid().getOrCreateTag().putInt("Count", 1);
+                }
+
+                FluidStack nextFluid() {
+                    return null;
+                }
+            }
+            """.trimIndent()
+        )
+
+        ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val migrated = source.readText()
+
+        assertTrue(
+            Regex(
+                """net\.minecraft\.world\.item\.ItemStack\s+modPorterCustomDataOwner\s*=\s*item;"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "(modPorterCustomDataOwner).set(" +
+                    "net.minecraft.core.component.DataComponents.CUSTOM_DATA"
+            ),
+            migrated
+        )
+        assertTrue(
+            Regex(
+                """net\.minecraft\.Util\.make\(nextFluid\(\),\s*""" +
+                    """modPorterCustomDataOwner\s*->\s*net\.minecraft\.Util\.make\("""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertEquals(
+            1,
+            Regex("""net\.minecraft\.Util\.make\(nextFluid\(\)""").findAll(migrated).count(),
+            migrated
+        )
     }
 
     @Test
@@ -202,7 +273,7 @@ class ExactLegacyCustomDataMigrationTest {
     }
 
     @Test
-    fun `receiver reassignment and lookalike owners fail closed`() {
+    fun `receiver reassignment snapshots the original owner while lookalikes remain untouched`() {
         val source = writeJava(
             "AmbiguousCustomData.java",
             """
@@ -230,12 +301,25 @@ class ExactLegacyCustomDataMigrationTest {
             }
             """.trimIndent()
         )
-        val original = source.readText()
-
         val changes = ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val migrated = source.readText()
 
-        assertTrue(changes.isEmpty())
-        assertEquals(original, source.readText())
+        assertEquals(1, changes.size)
+        assertTrue(
+            Regex(
+                """net\.minecraft\.world\.item\.ItemStack\s+modPorterCustomDataOwner\s*=\s*stack;"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(migrated.contains("stack = replacement;"), migrated)
+        assertTrue(
+            migrated.contains(
+                "(modPorterCustomDataOwner).set(" +
+                    "net.minecraft.core.component.DataComponents.CUSTOM_DATA"
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("return box.getOrCreateTag().getInt(\"Count\");"), migrated)
     }
 
     private fun writeJava(name: String, source: String): Path {

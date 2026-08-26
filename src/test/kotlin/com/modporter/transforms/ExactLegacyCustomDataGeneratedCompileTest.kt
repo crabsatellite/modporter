@@ -43,6 +43,14 @@ class ExactLegacyCustomDataGeneratedCompileTest {
                     return NBTHelper.readEnum(stack.getOrCreateTag(), "Mode", Mode.class);
                 }
 
+                void returnedFluid() {
+                    nextFluid().getOrCreateTag().putInt("Count", 1);
+                }
+
+                FluidStack nextFluid() {
+                    return new FluidStack();
+                }
+
                 enum Mode {
                     FIRST
                 }

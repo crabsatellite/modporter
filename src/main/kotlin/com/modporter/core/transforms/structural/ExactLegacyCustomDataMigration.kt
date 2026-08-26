@@ -44,7 +44,10 @@ internal class ExactLegacyCustomDataMigration {
     private data class AliasPlan(
         val call: MethodCallExpr,
         val variable: VariableDeclarator,
-        val receiver: NameExpr,
+        val receiver: Expression,
+        val kind: ReceiverKind,
+        val declarationStatement: ExpressionStmt,
+        val ownerName: String?,
         val mutationStatements: List<ExpressionStmt>
     ) : FilePlan
 
@@ -62,6 +65,7 @@ internal class ExactLegacyCustomDataMigration {
         val receiver: Expression,
         val kind: ReceiverKind,
         val statement: ExpressionStmt,
+        val ownerName: String,
         val tagName: String,
         val tagExpression: String
     ) : DirectPlan
@@ -106,7 +110,7 @@ internal class ExactLegacyCustomDataMigration {
                 val kind = kinds.getValue(call)
                 val variable = call.parentNode.orElse(null) as? VariableDeclarator
                 val plan: FilePlan? = if (variable != null && variable.initializer.orElse(null) === call) {
-                    planAlias(call, variable, exact)
+                    planAlias(call, variable, kind, exact)
                 } else {
                     planDirect(call, kind, exact)
                 }
@@ -119,7 +123,16 @@ internal class ExactLegacyCustomDataMigration {
             if (!complete) return@forEach
 
             aliasPlans.forEach { plan ->
-                plan.call.replace(StaticJavaParser.parseExpression(detachedTag(plan.receiver)))
+                val effectiveReceiver = plan.ownerName?.let(::NameExpr) ?: plan.receiver
+                if (plan.ownerName != null) {
+                    insertBefore(
+                        plan.declarationStatement,
+                        StaticJavaParser.parseStatement(
+                            "${receiverType(plan.kind)} ${plan.ownerName} = ${plan.receiver};"
+                        )
+                    )
+                }
+                plan.call.replace(StaticJavaParser.parseExpression(detachedTag(effectiveReceiver)))
                 plan.mutationStatements
                     .distinctBy { System.identityHashCode(it) }
                     .sortedByDescending {
@@ -129,7 +142,7 @@ internal class ExactLegacyCustomDataMigration {
                     .forEach { statement ->
                         insertAfter(
                             statement,
-                            writeBackStatement(plan.receiver.toString(), plan.variable.nameAsString)
+                            writeBackStatement(effectiveReceiver.toString(), plan.variable.nameAsString)
                         )
                     }
             }
@@ -143,9 +156,10 @@ internal class ExactLegacyCustomDataMigration {
                                 "$CUSTOM_DATA.update($DATA_COMPONENTS.CUSTOM_DATA, " +
                                     "${plan.receiver}, ${plan.tagName} -> ${plan.tagExpression})"
                             ReceiverKind.FLUID_STACK ->
-                                "net.minecraft.Util.make(${detachedTag(plan.receiver)}, ${plan.tagName} -> { " +
-                                    "${plan.tagExpression}; " +
-                                    "${writeBackCode(plan.receiver.toString(), plan.tagName)} })"
+                                "net.minecraft.Util.make(${plan.receiver}, ${plan.ownerName} -> " +
+                                    "net.minecraft.Util.make(${detachedTag(NameExpr(plan.ownerName))}, " +
+                                    "${plan.tagName} -> { ${plan.tagExpression}; " +
+                                    "${writeBackCode(plan.ownerName, plan.tagName)} }))"
                         }
                         plan.statement.setExpression(StaticJavaParser.parseExpression(migratedExpression))
                     }
@@ -180,6 +194,7 @@ internal class ExactLegacyCustomDataMigration {
     private fun planAlias(
         call: MethodCallExpr,
         variable: VariableDeclarator,
+        kind: ReceiverKind,
         exact: ExactJavaSemantics
     ): AliasPlan? {
         if (!exact.exactTypeReference(
@@ -190,8 +205,20 @@ internal class ExactLegacyCustomDataMigration {
         ) {
             return null
         }
-        val receiver = call.scope.get() as? NameExpr ?: return null
-        if (!isStableReceiver(receiver, call, exact)) return null
+        val receiver = call.scope.get()
+        val declaration = variable.parentNode.orElse(null)
+            ?.parentNode
+            ?.orElse(null) as? ExpressionStmt ?: return null
+        if (declaration.parentNode.orElse(null) !is BlockStmt &&
+            declaration.parentNode.orElse(null) !is SwitchEntry
+        ) {
+            return null
+        }
+        val ownerName = if (receiver is NameExpr && isStableReceiver(receiver, call, exact)) {
+            null
+        } else {
+            uniqueName(call, "modPorterCustomDataOwner")
+        }
 
         val uses = exact.referencesTo(variable)
         val classified = uses.map { classifyAliasUse(it, exact) }
@@ -200,6 +227,9 @@ internal class ExactLegacyCustomDataMigration {
             call = call,
             variable = variable,
             receiver = receiver,
+            kind = kind,
+            declarationStatement = declaration,
+            ownerName = ownerName,
             mutationStatements = classified.mapNotNull { it.mutationStatement }
         )
     }
@@ -215,17 +245,14 @@ internal class ExactLegacyCustomDataMigration {
             return when {
                 rooted.nameAsString in MUTATOR_METHODS -> {
                     val statement = standaloneStatement(rooted) ?: return null
-                    if (kind == ReceiverKind.FLUID_STACK &&
-                        (receiver !is NameExpr || !isStableReceiver(receiver, call, exact))
-                    ) {
-                        return null
-                    }
                     val tagName = uniqueName(call, "modPorterCustomDataTag")
+                    val ownerName = uniqueName(call, "modPorterCustomDataOwner")
                     DirectMutationPlan(
                         call,
                         receiver,
                         kind,
                         statement,
+                        ownerName,
                         tagName,
                         expressionWithTag(rooted, call, tagName)
                     )
@@ -248,17 +275,14 @@ internal class ExactLegacyCustomDataMigration {
                     isExactPotionUtilsRead(parentCall, exact) -> DirectReadPlan(call, receiver)
                 externalEffect == ExactExternalTagContracts.Effect.MUTATE -> {
                     val statement = standaloneStatement(parentCall) ?: return null
-                    if (kind == ReceiverKind.FLUID_STACK &&
-                        (receiver !is NameExpr || !isStableReceiver(receiver, call, exact))
-                    ) {
-                        return null
-                    }
                     val tagName = uniqueName(call, "modPorterCustomDataTag")
+                    val ownerName = uniqueName(call, "modPorterCustomDataOwner")
                     DirectMutationPlan(
                         call,
                         receiver,
                         kind,
                         statement,
+                        ownerName,
                         tagName,
                         expressionWithTag(parentCall, call, tagName)
                     )
@@ -413,6 +437,27 @@ internal class ExactLegacyCustomDataMigration {
         }
     }
 
+    private fun insertBefore(anchor: ExpressionStmt, statement: Statement) {
+        when (val parent = anchor.parentNode.orElse(null)) {
+            is BlockStmt -> {
+                val index = parent.statements.indexOfIdentity(anchor)
+                if (index < 0) throw IllegalStateException("Cannot locate custom-data alias declaration")
+                parent.statements.add(index, statement)
+            }
+            is SwitchEntry -> {
+                val index = parent.statements.indexOfIdentity(anchor)
+                if (index < 0) throw IllegalStateException("Cannot locate switch custom-data alias declaration")
+                parent.statements.add(index, statement)
+            }
+            else -> throw IllegalStateException("Custom-data alias is outside an ordered statement list")
+        }
+    }
+
+    private fun receiverType(kind: ReceiverKind): String = when (kind) {
+        ReceiverKind.ITEM_STACK -> ITEM_STACK
+        ReceiverKind.FLUID_STACK -> TARGET_FLUID_STACK
+    }
+
     private fun <T : Node> List<T>.indexOfIdentity(target: T): Int =
         indexOfFirst { it === target }
 
@@ -433,9 +478,10 @@ internal class ExactLegacyCustomDataMigration {
 
     private companion object {
         const val ITEM_STACK = "net.minecraft.world.item.ItemStack"
+        const val TARGET_FLUID_STACK = "net.neoforged.neoforge.fluids.FluidStack"
         val FLUID_STACKS = setOf(
             "net.minecraftforge.fluids.FluidStack",
-            "net.neoforged.neoforge.fluids.FluidStack"
+            TARGET_FLUID_STACK
         )
         const val DATA_COMPONENTS = "net.minecraft.core.component.DataComponents"
         const val CUSTOM_DATA = "net.minecraft.world.item.component.CustomData"

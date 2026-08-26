@@ -13,6 +13,14 @@ internal object ExactExternalTagContracts {
         argumentIndex: Int,
         exact: ExactJavaSemantics
     ): Effect? {
+        if (argumentIndex == 0 &&
+            call.nameAsString == "of" &&
+            call.scope.map {
+                exact.exactStaticScope(it, "CustomData", CUSTOM_DATA)
+            }.orElse(false)
+        ) {
+            return Effect.READ
+        }
         if (argumentIndex != 0 ||
             !call.scope.map {
                 exact.exactStaticScope(it, "NBTHelper", CATNIP_NBT_HELPER)
@@ -28,4 +36,5 @@ internal object ExactExternalTagContracts {
     }
 
     private const val CATNIP_NBT_HELPER = "net.createmod.catnip.nbt.NBTHelper"
+    private const val CUSTOM_DATA = "net.minecraft.world.item.component.CustomData"
 }
