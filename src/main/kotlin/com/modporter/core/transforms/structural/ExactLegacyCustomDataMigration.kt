@@ -24,6 +24,7 @@ import com.modporter.core.pipeline.Change
 import com.modporter.core.pipeline.Confidence
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.IdentityHashMap
 import kotlin.io.path.extension
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
@@ -86,6 +87,7 @@ internal class ExactLegacyCustomDataMigration {
         if (files.isEmpty()) return emptyList()
 
         val index = JavaProjectTypeIndex.build(sourceRoot)
+        val projectTagEffects = ExactProjectTagEffects(sourceRoot, index)
         val parser = JavaParser(
             ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
         )
@@ -95,11 +97,12 @@ internal class ExactLegacyCustomDataMigration {
             val cu = index.unit(file)
             LexicalPreservingPrinter.setup(cu)
             val exact = ExactJavaSemantics(cu)
-            val kinds = linkedMapOf<MethodCallExpr, ReceiverKind>()
+            val kinds = IdentityHashMap<MethodCallExpr, ReceiverKind>()
             val calls = cu.findAll(MethodCallExpr::class.java)
                 .filter { it.nameAsString == "getOrCreateTag" && it.arguments.isEmpty() && it.scope.isPresent }
                 .filter { call ->
-                    receiverKind(index, call.scope.get(), call)?.also { kinds[call] = it } != null
+                    receiverKind(index, call.scope.get(), call, exact)
+                        ?.also { kinds[call] = it } != null
                 }
             if (calls.isEmpty()) return@forEach
 
@@ -110,9 +113,9 @@ internal class ExactLegacyCustomDataMigration {
                 val kind = kinds.getValue(call)
                 val variable = call.parentNode.orElse(null) as? VariableDeclarator
                 val plan: FilePlan? = if (variable != null && variable.initializer.orElse(null) === call) {
-                    planAlias(call, variable, kind, exact)
+                    planAlias(call, variable, kind, exact, projectTagEffects)
                 } else {
-                    planDirect(call, kind, exact)
+                    planDirect(call, kind, exact, projectTagEffects)
                 }
                 when (plan) {
                     is AliasPlan -> aliasPlans += plan
@@ -195,7 +198,8 @@ internal class ExactLegacyCustomDataMigration {
         call: MethodCallExpr,
         variable: VariableDeclarator,
         kind: ReceiverKind,
-        exact: ExactJavaSemantics
+        exact: ExactJavaSemantics,
+        projectTagEffects: ExactProjectTagEffects
     ): AliasPlan? {
         if (!exact.exactTypeReference(
                 variable.typeAsString,
@@ -221,7 +225,7 @@ internal class ExactLegacyCustomDataMigration {
         }
 
         val uses = exact.referencesTo(variable)
-        val classified = uses.map { classifyAliasUse(it, exact) }
+        val classified = uses.map { classifyAliasUse(it, exact, projectTagEffects) }
         if (classified.any { !it.supported }) return null
         return AliasPlan(
             call = call,
@@ -237,13 +241,14 @@ internal class ExactLegacyCustomDataMigration {
     private fun planDirect(
         call: MethodCallExpr,
         kind: ReceiverKind,
-        exact: ExactJavaSemantics
+        exact: ExactJavaSemantics,
+        projectTagEffects: ExactProjectTagEffects
     ): DirectPlan? {
         val receiver = call.scope.get()
         val rooted = rootedCall(call)
         if (rooted != null && rooted !== call) {
-            return when {
-                rooted.nameAsString in MUTATOR_METHODS -> {
+            return when (ExactExternalTagContracts.compoundTagReceiverEffect(rooted.nameAsString)) {
+                ExactExternalTagContracts.Effect.MUTATE -> {
                     val statement = standaloneStatement(rooted) ?: return null
                     val tagName = uniqueName(call, "modPorterCustomDataTag")
                     val ownerName = uniqueName(call, "modPorterCustomDataOwner")
@@ -257,8 +262,8 @@ internal class ExactLegacyCustomDataMigration {
                         expressionWithTag(rooted, call, tagName)
                     )
                 }
-                rooted.nameAsString in SAFE_READ_METHODS -> DirectReadPlan(call, receiver)
-                else -> null
+                ExactExternalTagContracts.Effect.READ -> DirectReadPlan(call, receiver)
+                null -> null
             }
         }
 
@@ -269,10 +274,9 @@ internal class ExactLegacyCustomDataMigration {
                 parentCall,
                 argumentIndex,
                 exact
-            )
+            ) ?: projectTagEffects.compoundTagArgumentEffect(parentCall, argumentIndex)
             return when {
-                externalEffect == ExactExternalTagContracts.Effect.READ ||
-                    isExactPotionUtilsRead(parentCall, exact) -> DirectReadPlan(call, receiver)
+                externalEffect == ExactExternalTagContracts.Effect.READ -> DirectReadPlan(call, receiver)
                 externalEffect == ExactExternalTagContracts.Effect.MUTATE -> {
                     val statement = standaloneStatement(parentCall) ?: return null
                     val tagName = uniqueName(call, "modPorterCustomDataTag")
@@ -293,14 +297,18 @@ internal class ExactLegacyCustomDataMigration {
         return null
     }
 
-    private fun classifyAliasUse(use: NameExpr, exact: ExactJavaSemantics): AliasUse {
+    private fun classifyAliasUse(
+        use: NameExpr,
+        exact: ExactJavaSemantics,
+        projectTagEffects: ExactProjectTagEffects
+    ): AliasUse {
         val rooted = rootedCall(use)
         if (rooted != null) {
-            return when {
-                rooted.nameAsString in MUTATOR_METHODS ->
+            return when (ExactExternalTagContracts.compoundTagReceiverEffect(rooted.nameAsString)) {
+                ExactExternalTagContracts.Effect.MUTATE ->
                     AliasUse(true, standaloneStatement(rooted) ?: return AliasUse(false))
-                rooted.nameAsString in SAFE_READ_METHODS -> AliasUse(true)
-                else -> AliasUse(false)
+                ExactExternalTagContracts.Effect.READ -> AliasUse(true)
+                null -> AliasUse(false)
             }
         }
 
@@ -311,10 +319,9 @@ internal class ExactLegacyCustomDataMigration {
                 parentCall,
                 argumentIndex,
                 exact
-            )
+            ) ?: projectTagEffects.compoundTagArgumentEffect(parentCall, argumentIndex)
             return when {
-                externalEffect == ExactExternalTagContracts.Effect.READ ||
-                    isExactPotionUtilsRead(parentCall, exact) -> AliasUse(true)
+                externalEffect == ExactExternalTagContracts.Effect.READ -> AliasUse(true)
                 externalEffect == ExactExternalTagContracts.Effect.MUTATE ->
                     AliasUse(true, standaloneStatement(parentCall) ?: return AliasUse(false))
                 else -> AliasUse(false)
@@ -394,22 +401,25 @@ internal class ExactLegacyCustomDataMigration {
     private fun receiverKind(
         index: JavaProjectTypeIndex,
         receiver: Expression,
-        context: Node
-    ): ReceiverKind? = when {
-        index.isExpressionAssignableTo(receiver, context, ITEM_STACK) -> ReceiverKind.ITEM_STACK
-        FLUID_STACKS.any { index.isExpressionAssignableTo(receiver, context, it) } ->
-            ReceiverKind.FLUID_STACK
-        else -> null
-    }
-
-    private fun isExactPotionUtilsRead(
-        call: MethodCallExpr,
+        context: Node,
         exact: ExactJavaSemantics
-    ): Boolean =
-        call.nameAsString in POTION_UTILS_READS &&
-            call.scope.map {
-                exact.exactStaticScope(it, "PotionUtils", POTION_UTILS)
-            }.orElse(false)
+    ): ReceiverKind? {
+        val exactItem = exact.isProvablyType(receiver, "ItemStack", ITEM_STACK)
+        val exactFluid = exact.isProvablyType(receiver, "FluidStack", FLUID_STACKS)
+        if (exactItem xor exactFluid) {
+            return if (exactItem) ReceiverKind.ITEM_STACK else ReceiverKind.FLUID_STACK
+        }
+
+        val indexedItem = index.isExpressionAssignableTo(receiver, context, ITEM_STACK)
+        val indexedFluid = FLUID_STACKS.any {
+            index.isExpressionAssignableTo(receiver, context, it)
+        }
+        return when {
+            indexedItem && !indexedFluid -> ReceiverKind.ITEM_STACK
+            indexedFluid && !indexedItem -> ReceiverKind.FLUID_STACK
+            else -> null
+        }
+    }
 
     private fun detachedTag(receiver: Expression): String =
         "($receiver).getOrDefault($DATA_COMPONENTS.CUSTOM_DATA, $CUSTOM_DATA.EMPTY).copyTag()"
@@ -485,64 +495,5 @@ internal class ExactLegacyCustomDataMigration {
         )
         const val DATA_COMPONENTS = "net.minecraft.core.component.DataComponents"
         const val CUSTOM_DATA = "net.minecraft.world.item.component.CustomData"
-        const val POTION_UTILS = "net.minecraft.world.item.alchemy.PotionUtils"
-
-        val MUTATOR_METHODS = setOf(
-            "put",
-            "putByte",
-            "putShort",
-            "putInt",
-            "putLong",
-            "putUUID",
-            "putFloat",
-            "putDouble",
-            "putString",
-            "putByteArray",
-            "putIntArray",
-            "putLongArray",
-            "putBoolean",
-            "remove",
-            "merge",
-            "add",
-            "addAll",
-            "set",
-            "clear",
-            "replaceAll",
-            "sort"
-        )
-        val SAFE_READ_METHODS = setOf(
-            "sizeInBytes",
-            "getId",
-            "getType",
-            "size",
-            "getUUID",
-            "hasUUID",
-            "getTagType",
-            "contains",
-            "getByte",
-            "getShort",
-            "getInt",
-            "getLong",
-            "getFloat",
-            "getDouble",
-            "getString",
-            "getByteArray",
-            "getIntArray",
-            "getLongArray",
-            "getBoolean",
-            "toString",
-            "isEmpty",
-            "copy",
-            "equals",
-            "hashCode",
-            "accept"
-        )
-        val POTION_UTILS_READS = setOf(
-            "getPotion",
-            "getCustomEffects",
-            "getAllEffects",
-            "getMobEffects",
-            "getColor"
-        )
     }
 }

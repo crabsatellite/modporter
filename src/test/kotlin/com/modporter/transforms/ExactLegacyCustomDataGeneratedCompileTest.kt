@@ -9,6 +9,7 @@ import javax.tools.DiagnosticCollector
 import javax.tools.JavaFileObject
 import javax.tools.ToolProvider
 import kotlin.io.path.createDirectories
+import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.streams.toList
 import kotlin.test.assertTrue
@@ -51,6 +52,15 @@ class ExactLegacyCustomDataGeneratedCompileTest {
                     return new FluidStack();
                 }
 
+                void projectMutation(ItemStack stack) {
+                    CompoundTag tag = stack.getOrCreateTag();
+                    mutate(tag);
+                }
+
+                static void mutate(CompoundTag tag) {
+                    tag.putInt("Count", 1);
+                }
+
                 enum Mode {
                     FIRST
                 }
@@ -59,6 +69,7 @@ class ExactLegacyCustomDataGeneratedCompileTest {
         )
 
         ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val migratedSource = tempDir.resolve("src/main/java/com/example/CustomDataCalls.java").readText()
         writeTargetStubs()
 
         val compiler = ToolProvider.getSystemJavaCompiler()
@@ -84,7 +95,7 @@ class ExactLegacyCustomDataGeneratedCompileTest {
                 diagnostics.diagnostics.joinToString("\n") { diagnostic ->
                     "${diagnostic.kind}: ${diagnostic.source?.name}:" +
                         "${diagnostic.lineNumber} ${diagnostic.getMessage(null)}"
-                }
+                } + "\n\n" + migratedSource
             )
         }
     }

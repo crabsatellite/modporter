@@ -254,12 +254,92 @@ class ExactLegacyCustomDataMigrationTest {
             import net.minecraft.world.item.ItemStack;
 
             class UnsupportedCustomData {
+                CompoundTag escaped;
+
                 void mixed(ItemStack first, ItemStack second) {
                     first.getOrCreateTag().putInt("Safe", 1);
                     consume(second.getOrCreateTag());
                 }
 
                 void consume(CompoundTag tag) {
+                    escaped = tag;
+                }
+            }
+            """.trimIndent()
+        )
+        val original = source.readText()
+
+        val changes = ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+
+        assertTrue(changes.isEmpty())
+        assertEquals(original, source.readText())
+    }
+
+    @Test
+    fun `project method tag effects are derived from exact parameter uses`() {
+        val source = writeJava(
+            "ProjectTagEffects.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            class ProjectTagEffects {
+                void apply(ItemStack written, ItemStack readOnly) {
+                    CompoundTag first = written.getOrCreateTag();
+                    write(first);
+                    CompoundTag second = readOnly.getOrCreateTag();
+                    int value = read(second);
+                }
+
+                static void write(CompoundTag tag) {
+                    tag.putInt("Count", 1);
+                }
+
+                static int read(CompoundTag tag) {
+                    return tag.getInt("Count");
+                }
+            }
+            """.trimIndent()
+        )
+
+        ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val migrated = source.readText()
+
+        assertTrue(!migrated.contains("getOrCreateTag"), migrated)
+        assertTrue(
+            Regex("""write\(first\);\s*if \(\(first\)\.isEmpty\(\)\)""")
+                .containsMatchIn(migrated),
+            migrated
+        )
+        assertEquals(
+            0,
+            Regex("""read\(second\);\s*if \(\(second\)\.isEmpty\(\)\)""")
+                .findAll(migrated)
+                .count(),
+            migrated
+        )
+    }
+
+    @Test
+    fun `project method tag escape keeps the source graph untouched`() {
+        val source = writeJava(
+            "ProjectTagEscape.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            class ProjectTagEscape {
+                CompoundTag expose(ItemStack stack) {
+                    CompoundTag tag = stack.getOrCreateTag();
+                    return identity(tag);
+                }
+
+                static CompoundTag identity(CompoundTag tag) {
+                    return tag;
                 }
             }
             """.trimIndent()
