@@ -1,11 +1,13 @@
 package com.modporter.transforms
 
+import com.modporter.core.transforms.build.ResidualRemovedApiGate
 import com.modporter.core.transforms.build.BuildSystemPass
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class ResidualRemovedApiGateTest {
@@ -84,5 +86,65 @@ class ResidualRemovedApiGateTest {
         val result = BuildSystemPass().apply(tempDir)
 
         assertTrue(result.errors.isEmpty(), result.errors.toString())
+    }
+
+    @Test
+    fun `exact legacy live tag calls are hard gated without matching lookalikes`() {
+        val directory = tempDir.resolve("src/main/java/com/example")
+        directory.createDirectories()
+        directory.resolve("ResidualTags.java").writeText(
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            class ResidualTags {
+                int item(ItemStack stack) {
+                    return stack.getOrCreateTag().getInt("Count");
+                }
+
+                int fluid(FluidStack stack) {
+                    return stack.getOrCreateTag().getInt("Count");
+                }
+
+                int member(Container container) {
+                    return container.stack.getOrCreateTag().getInt("Count");
+                }
+
+                int element(ItemStack stack) {
+                    return stack.getOrCreateTagElement("Child").getInt("Count");
+                }
+
+                int lookalike(Box stack) {
+                    return stack.getOrCreateTag().getInt("Count");
+                }
+
+                static class Box {
+                    CompoundTag getOrCreateTag() {
+                        return new CompoundTag();
+                    }
+                }
+
+                static class Container {
+                    ItemStack stack;
+                }
+            }
+            """.trimIndent()
+        )
+
+        val findings = ResidualRemovedApiGate.scan(tempDir)
+
+        assertEquals(2, findings.size, findings.joinToString("\n"))
+        assertTrue(findings.any { it.contains("ItemStack/FluidStack.getOrCreateTag API") }, findings.toString())
+        assertTrue(
+            findings.any { it.contains("ItemStack/FluidStack.getOrCreateTagElement API") },
+            findings.toString()
+        )
+        assertTrue(
+            findings.all { it.endsWith("src/main/java/com/example/ResidualTags.java") },
+            findings.toString()
+        )
     }
 }

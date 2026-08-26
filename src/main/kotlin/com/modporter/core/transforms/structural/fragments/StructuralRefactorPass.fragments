@@ -1,4 +1,5 @@
 001-header.ktfrag
+001b-migrate-legacy-payload-handler-context.ktfrag
 002-cleanup-legacy-payload-context-references.ktfrag
 003-migrate-item-stack-capability-optionals.ktfrag
 004-remove-mixin-accessor-from-configs.ktfrag

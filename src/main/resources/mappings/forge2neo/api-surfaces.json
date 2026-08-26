@@ -145,6 +145,7 @@
     ],
     "allowedFiles": [
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalProviderContracts.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTagContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTypeContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt"
     ],

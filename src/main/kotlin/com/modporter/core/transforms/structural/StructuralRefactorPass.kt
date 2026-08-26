@@ -559,6 +559,12 @@ class StructuralRefactorPass : Pass {
             errors.add("BowlFoodItem subclass migration error: ${e.message}")
         }
 
+        try {
+            changes.addAll(ExactLegacyCustomDataMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Exact legacy custom-data graph migration error: ${e.message}")
+        }
+
         // Migrate common 1.21 API surface changes that are too broad for
         // project-specific rewrites: split tick events, BlockEntity NBT hooks,
         // tooltip context imports, and Holder<MobEffect> call sites.
@@ -30683,7 +30689,7 @@ ${indent}}
             result = replaceExecutableRegex(result, Regex("""\b$receiver\.hasTag\s*\(\s*\)""")) {
                 "$stack.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA)"
             }
-            result = replaceExecutableRegex(result, Regex("""\b$receiver\.get(?:OrCreate)?Tag\s*\(\s*\)""")) {
+            result = replaceExecutableRegex(result, Regex("""\b$receiver\.getTag\s*\(\s*\)""")) {
                 "$stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"
             }
         }
@@ -30699,15 +30705,6 @@ ${indent}}
             "$stack.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA)"
         }
         result = rewriteJavaCallWithOffset(result, "getTag") { receiver, args, _ ->
-            if (args.isNotEmpty()) return@rewriteJavaCallWithOffset null
-            val stack = receiver.trim()
-            if (Regex("""[A-Za-z_$][\w$]*""").matches(stack)) return@rewriteJavaCallWithOffset null
-            if (!isItemStackExpression(stack, itemStackVariables, itemStackReturningMethods, knownItemStackAccessors)) {
-                return@rewriteJavaCallWithOffset null
-            }
-            "$stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"
-        }
-        result = rewriteJavaCallWithOffset(result, "getOrCreateTag") { receiver, args, _ ->
             if (args.isNotEmpty()) return@rewriteJavaCallWithOffset null
             val stack = receiver.trim()
             if (Regex("""[A-Za-z_$][\w$]*""").matches(stack)) return@rewriteJavaCallWithOffset null

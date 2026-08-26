@@ -2122,21 +2122,6 @@
       "fileGlob": "*.java"
     },
     {
-      "id": "nbt-stack-getOrCreateTag-putLong",
-      "pattern": "(\\w+)\\.getOrCreateTag\\(\\)\\.putLong\\(([^;]+)\\);",
-      "replacement": "net.minecraft.world.item.component.CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, $1, customDataTag -> customDataTag.putLong($2));",
-      "description": "ItemStack.getOrCreateTag().putLong() must write back to CUSTOM_DATA in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "nbt-stack-getOrCreateTag",
-      "pattern": ".getOrCreateTag()",
-      "replacement": ".getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()",
-      "description": "ItemStack.getOrCreateTag() -> DataComponents.CUSTOM_DATA in 1.21",
-      "fileGlob": "*.java"
-    },
-    {
       "id": "gui-renderBackground-remove",
       "pattern": "\\s+renderBackground\\(guiGraphics\\);\\r?\\n",
       "replacement": "",
@@ -2817,14 +2802,6 @@
       "pattern": "SimpleCraftingRecipeSerializer\\(([^:]+)::new\\)",
       "replacement": "SimpleCraftingRecipeSerializer<>($1::new)",
       "description": "SimpleCraftingRecipeSerializer add diamond operator for generic type resolution in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "nbt-getOrCreateTagElement-to-component",
-      "pattern": "\\.getOrCreateTagElement\\(",
-      "replacement": ".getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound(",
-      "description": "ItemStack.getOrCreateTagElement() -> DataComponents sub-compound access in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },

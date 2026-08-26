@@ -112,7 +112,15 @@ internal class ExactJavaSemantics(private val cu: CompilationUnit) {
     fun isProvablyType(expression: Expression, simpleName: String, fqn: String): Boolean =
         isProvablyType(expression, simpleName, setOf(fqn))
 
-    fun referencesTo(declaration: VariableDeclarator): List<NameExpr> {
+    fun declarationOf(name: NameExpr): Node? = valueDeclaration(name)
+
+    fun referencesTo(declaration: VariableDeclarator): List<NameExpr> =
+        referencesToDeclaration(declaration)
+
+    fun referencesTo(parameter: Parameter): List<NameExpr> =
+        referencesToDeclaration(parameter)
+
+    private fun referencesToDeclaration(declaration: Node): List<NameExpr> {
         val callable = declaration.findAncestor(CallableDeclaration::class.java).orElse(null)
             ?: return emptyList()
         return callable.findAll(NameExpr::class.java).filter { name ->

@@ -9,6 +9,8 @@ import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.Expression
 import com.github.javaparser.ast.expr.FieldAccessExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
+import com.modporter.core.transforms.structural.ExactJavaSemantics
+import com.modporter.core.transforms.structural.JavaProjectTypeIndex
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.extension
@@ -18,11 +20,20 @@ internal object ResidualRemovedApiGate {
     private const val POTION_UTILS = "net.minecraft.world.item.alchemy.PotionUtils"
     private const val POTIONS = "net.minecraft.world.item.alchemy.Potions"
     private const val POTION = "net.minecraft.world.item.alchemy.Potion"
+    private const val ITEM_STACK = "net.minecraft.world.item.ItemStack"
+    private val FLUID_STACKS = setOf(
+        "net.minecraftforge.fluids.FluidStack",
+        "net.neoforged.neoforge.fluids.FluidStack"
+    )
 
     fun scan(projectDir: Path): List<String> {
         val parser = JavaParser(
             ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
         )
+        val sourceRoot = projectDir.resolve("src/main/java")
+        val typeIndex = runCatching {
+            if (Files.isDirectory(sourceRoot)) JavaProjectTypeIndex.build(sourceRoot) else null
+        }.getOrNull()
         val findings = mutableListOf<String>()
         Files.walk(projectDir).use { paths ->
             paths.filter { it.extension == "java" }
@@ -45,7 +56,7 @@ internal object ResidualRemovedApiGate {
                                 parsed.problems.joinToString("; ") { it.verboseMessage }
                         return@forEach
                     }
-                    val categories = removedPotionApiCategories(cu)
+                    val categories = removedPotionApiCategories(cu, typeIndex)
                     categories.forEach { category ->
                         findings +=
                             "Residual removed Minecraft 1.20.1 $category API in " +
@@ -60,11 +71,17 @@ internal object ResidualRemovedApiGate {
         source.contains("PotionUtils") ||
             source.contains("Potions.EMPTY") ||
             source.contains("Potion.byName") ||
+            source.contains(".getOrCreateTag(") ||
+            source.contains(".getOrCreateTagElement(") ||
             source.contains("$POTIONS.EMPTY") ||
             source.contains("$POTION.byName")
 
-    private fun removedPotionApiCategories(cu: CompilationUnit): Set<String> {
+    private fun removedPotionApiCategories(
+        cu: CompilationUnit,
+        typeIndex: JavaProjectTypeIndex?
+    ): Set<String> {
         val categories = linkedSetOf<String>()
+        val exact = ExactJavaSemantics(cu)
         if (cu.imports.any {
                 it.nameAsString == POTION_UTILS ||
                     it.isStatic && it.nameAsString.startsWith("$POTION_UTILS.")
@@ -92,6 +109,17 @@ internal object ResidualRemovedApiGate {
 
         cu.findAll(MethodCallExpr::class.java).forEach { call ->
             val scope = call.scope.orElse(null) ?: return@forEach
+            if (call.nameAsString in setOf("getOrCreateTag", "getOrCreateTagElement") &&
+                call.arguments.size == (if (call.nameAsString == "getOrCreateTag") 0 else 1) &&
+                (exact.isProvablyType(scope, "ItemStack", ITEM_STACK) ||
+                    exact.isProvablyType(scope, "FluidStack", FLUID_STACKS) ||
+                    typeIndex?.isExpressionAssignableTo(scope, call, ITEM_STACK) == true ||
+                    FLUID_STACKS.any {
+                        typeIndex?.isExpressionAssignableTo(scope, call, it) == true
+                    })
+            ) {
+                categories += "ItemStack/FluidStack.${call.nameAsString}"
+            }
             if (call.nameAsString == "byName" && exactStaticScope(cu, scope, "Potion", POTION)) {
                 categories += "Potion.byName"
             }
