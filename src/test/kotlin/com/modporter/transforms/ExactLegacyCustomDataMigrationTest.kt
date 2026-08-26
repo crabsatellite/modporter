@@ -536,6 +536,7 @@ class ExactLegacyCustomDataMigrationTest {
             import net.minecraft.nbt.ListTag;
             import net.minecraft.nbt.Tag;
             import net.minecraft.world.item.ItemStack;
+            import java.util.Objects;
 
             class NestedTagReads {
                 int child(ItemStack stack) {
@@ -555,6 +556,11 @@ class ExactLegacyCustomDataMigrationTest {
                 ItemStack parsed(ItemStack stack) {
                     CompoundTag root = stack.getOrCreateTag();
                     return ItemStack.of(root.getCompound("Stored"));
+                }
+
+                boolean compared(ItemStack stack) {
+                    CompoundTag root = stack.getOrCreateTag();
+                    return Objects.equals(new CompoundTag(), root.get("Stored"));
                 }
             }
             """.trimIndent()

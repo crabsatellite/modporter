@@ -41,6 +41,14 @@ internal object ExactExternalTagContracts {
         ) {
             return Effect.READ
         }
+        if (call.nameAsString == "equals" &&
+            argumentIndex in call.arguments.indices &&
+            call.scope.map {
+                exact.exactStaticScope(it, "Objects", OBJECTS)
+            }.orElse(false)
+        ) {
+            return Effect.READ
+        }
         val receiverType = typeIndex?.methodCallReceiverType(call)
         val exactItemHandler = call.scope.map { scope ->
             exact.isProvablyType(scope, "ItemStackHandler", ITEM_STACK_HANDLERS)
@@ -116,6 +124,7 @@ internal object ExactExternalTagContracts {
     private const val POTION_UTILS = "net.minecraft.world.item.alchemy.PotionUtils"
     private const val ITEM_STACK = "net.minecraft.world.item.ItemStack"
     private const val NBT_UTILS = "net.minecraft.nbt.NbtUtils"
+    private const val OBJECTS = "java.util.Objects"
     private const val COMPOUND_TAG = "net.minecraft.nbt.CompoundTag"
     private val ITEM_STACK_HANDLERS = setOf(
         "net.minecraftforge.items.ItemStackHandler",
