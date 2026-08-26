@@ -1,6 +1,8 @@
 package com.modporter.core.transforms.structural
 
 import com.github.javaparser.ast.expr.MethodCallExpr
+import com.github.javaparser.ast.expr.LambdaExpr
+import com.github.javaparser.ast.expr.NameExpr
 
 internal object ExactExternalTagContracts {
     enum class Effect {
@@ -40,11 +42,46 @@ internal object ExactExternalTagContracts {
             return Effect.READ
         }
         val receiverType = typeIndex?.methodCallReceiverType(call)
+        val exactItemHandler = call.scope.map { scope ->
+            exact.isProvablyType(scope, "ItemStackHandler", ITEM_STACK_HANDLERS)
+        }.orElse(false)
         if (call.nameAsString == "deserializeNBT" &&
             argumentIndex == call.arguments.lastIndex &&
-            receiverType in ITEM_STACK_HANDLERS
+            (receiverType in ITEM_STACK_HANDLERS || exactItemHandler)
         ) {
             return Effect.READ
+        }
+        if (call.nameAsString == "put" &&
+            argumentIndex == 1 &&
+            call.arguments.size == 2
+        ) {
+            val scope = call.scope.orElse(null)
+            val customDataUpdateTag = (scope as? NameExpr)?.let { tagName ->
+                val lambda = call.findAncestor(LambdaExpr::class.java).orElse(null)
+                    ?: return@let false
+                val updateCall = lambda.parentNode.orElse(null) as? MethodCallExpr
+                    ?: return@let false
+                lambda.parameters.any { it.nameAsString == tagName.nameAsString } &&
+                    updateCall.nameAsString == "update" &&
+                    updateCall.arguments.size == 3 &&
+                    updateCall.arguments[2] === lambda &&
+                    updateCall.scope.map {
+                        exact.exactStaticScope(it, "CustomData", CUSTOM_DATA)
+                    }.orElse(false)
+            } == true
+            val exactCompound = scope != null &&
+                (exact.isProvablyType(scope, "CompoundTag", COMPOUND_TAG) ||
+                    typeIndex?.isExpressionAssignableTo(scope, call, COMPOUND_TAG) == true ||
+                    customDataUpdateTag)
+            val legacyLiveTag = (scope as? MethodCallExpr)?.let { tagCall ->
+                tagCall.nameAsString == "getOrCreateTag" &&
+                    tagCall.arguments.isEmpty() &&
+                    tagCall.scope.map { owner ->
+                        exact.isProvablyType(owner, "ItemStack", ITEM_STACK) ||
+                            typeIndex?.isExpressionAssignableTo(owner, tagCall, ITEM_STACK) == true
+                    }.orElse(false)
+            } == true
+            if (exactCompound || legacyLiveTag) return Effect.READ
         }
         if (argumentIndex == 0 &&
             call.nameAsString in POTION_UTILS_READS &&
@@ -79,6 +116,7 @@ internal object ExactExternalTagContracts {
     private const val POTION_UTILS = "net.minecraft.world.item.alchemy.PotionUtils"
     private const val ITEM_STACK = "net.minecraft.world.item.ItemStack"
     private const val NBT_UTILS = "net.minecraft.nbt.NbtUtils"
+    private const val COMPOUND_TAG = "net.minecraft.nbt.CompoundTag"
     private val ITEM_STACK_HANDLERS = setOf(
         "net.minecraftforge.items.ItemStackHandler",
         "net.neoforged.neoforge.items.ItemStackHandler"

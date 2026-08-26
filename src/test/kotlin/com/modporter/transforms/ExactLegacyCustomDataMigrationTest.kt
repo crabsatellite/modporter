@@ -298,6 +298,125 @@ class ExactLegacyCustomDataMigrationTest {
     }
 
     @Test
+    fun `tag elements preserve attachment mutation and read lift semantics`() {
+        val local = writeJava(
+            "LocalTagElement.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            class LocalTagElement {
+                void local(ItemStack stack, String key) {
+                    CompoundTag child = stack.getOrCreateTagElement(key);
+                    child.putInt("Count", 1);
+                    net.minecraft.world.item.component.CustomData.update(
+                        net.minecraft.core.component.DataComponents.CUSTOM_DATA,
+                        stack,
+                        root -> root.put(key, child)
+                    );
+                }
+            }
+            """.trimIndent()
+        )
+        val direct = writeJava(
+            "DirectTagElement.java",
+            """
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            class DirectTagElement {
+                void direct(ItemStack stack) {
+                    stack.getOrCreateTagElement("Direct").putInt("Count", 1);
+                }
+            }
+            """.trimIndent()
+        )
+        val lifted = writeJava(
+            "LiftedTagElement.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            class LiftedTagElement {
+                int lifted(ItemStack stack) {
+                    return read(stack.getOrCreateTagElement("Read"));
+                }
+
+                static int read(
+                    CompoundTag tag,
+                    net.minecraft.core.HolderLookup.Provider registries
+                ) {
+                    return tag.getInt("Count");
+                }
+            }
+            """.trimIndent()
+        )
+        val handler = writeJava(
+            "HandlerTagElement.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+
+            class HandlerTagElement {
+                ItemStackHandler read(ItemStack stack) {
+                    ItemStackHandler handler = new ItemStackHandler(9);
+                    CompoundTag child = stack.getOrCreateTagElement("Items");
+                    handler.deserializeNBT(child);
+                    return handler;
+                }
+            }
+            """.trimIndent()
+        )
+
+        val changes = ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val localMigrated = local.readText()
+        val directMigrated = direct.readText()
+        val liftedMigrated = lifted.readText()
+        val handlerMigrated = handler.readText()
+        val migrated = listOf(
+            localMigrated,
+            directMigrated,
+            liftedMigrated,
+            handlerMigrated
+        ).joinToString("\n")
+
+        assertEquals(4, changes.size, migrated)
+        assertTrue(!migrated.contains("getOrCreateTagElement"), migrated)
+        assertTrue(
+            Regex(
+                """String\s+modPorterCustomDataKey\s*=\s*key;[\s\S]*?""" +
+                    """CompoundTag\s+child\s*=\s*modPorterCustomDataRoot\.getCompound""" +
+                    """\(modPorterCustomDataKey\);"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(
+            Regex(
+                """CustomData\.update\([\s\S]*?String\s+modPorterCustomDataKey\d*\s*=\s*"Direct";""" +
+                    """[\s\S]*?modPorterCustomDataChild\d*\.putInt\("Count",\s*1\);""" +
+                    """[\s\S]*?modPorterCustomDataRoot\d*\.put\("""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+        assertTrue(
+            Regex(
+                """CompoundTag\s+modPorterCustomDataChild\d*\s*=\s*""" +
+                    """modPorterCustomDataRoot\d*\.getCompound\(modPorterCustomDataKey\d*\);""" +
+                    """[\s\S]*?return read\(modPorterCustomDataChild\d*\);"""
+            ).containsMatchIn(migrated),
+            migrated
+        )
+    }
+
+    @Test
     fun `unsupported tag escape keeps every exact call in the file untouched`() {
         val source = writeJava(
             "UnsupportedCustomData.java",

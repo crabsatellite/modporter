@@ -74,6 +74,39 @@ internal class ExactLegacyCustomDataMigration {
         val tagExpression: String
     ) : DirectPlan
 
+    private data class ElementAliasPlan(
+        val call: MethodCallExpr,
+        val variable: VariableDeclarator,
+        val receiver: Expression,
+        val declarationStatement: ExpressionStmt,
+        val ownerName: String,
+        val keyName: String,
+        val rootName: String,
+        val mutationStatements: List<ExpressionStmt>
+    ) : FilePlan
+
+    private data class ElementMutationPlan(
+        val call: MethodCallExpr,
+        val receiver: Expression,
+        val statement: ExpressionStmt,
+        val keyExpression: Expression,
+        val keyName: String,
+        val rootName: String,
+        val childName: String,
+        val mutationExpression: String
+    ) : FilePlan
+
+    private data class ElementReadLiftPlan(
+        val call: MethodCallExpr,
+        val receiver: Expression,
+        val anchor: Statement,
+        val keyExpression: Expression,
+        val ownerName: String,
+        val keyName: String,
+        val rootName: String,
+        val childName: String
+    ) : FilePlan
+
     private data class AliasUse(
         val supported: Boolean,
         val mutationStatement: ExpressionStmt? = null
@@ -89,7 +122,11 @@ internal class ExactLegacyCustomDataMigration {
         if (!Files.isDirectory(sourceRoot)) return emptyList()
         val files = Files.walk(sourceRoot).use { paths ->
             paths.filter { it.extension == "java" }
-                .filter { it.readText().contains(".getOrCreateTag(") }
+                .filter {
+                    val source = it.readText()
+                    source.contains(".getOrCreateTag(") ||
+                        source.contains(".getOrCreateTagElement(")
+                }
                 .toList()
         }
         if (files.isEmpty()) return emptyList()
@@ -107,7 +144,12 @@ internal class ExactLegacyCustomDataMigration {
             val exact = ExactJavaSemantics(cu)
             val kinds = IdentityHashMap<MethodCallExpr, ReceiverKind>()
             val calls = cu.findAll(MethodCallExpr::class.java)
-                .filter { it.nameAsString == "getOrCreateTag" && it.arguments.isEmpty() && it.scope.isPresent }
+                .filter {
+                    ((it.nameAsString == "getOrCreateTag" && it.arguments.isEmpty()) ||
+                        (it.nameAsString == "getOrCreateTagElement" &&
+                            it.arguments.size == 1)) &&
+                        it.scope.isPresent
+                }
                 .filter { call ->
                     receiverKind(index, call.scope.get(), call, exact)
                         ?.also { kinds[call] = it } != null
@@ -116,11 +158,16 @@ internal class ExactLegacyCustomDataMigration {
 
             val aliasPlans = mutableListOf<AliasPlan>()
             val directPlans = mutableListOf<DirectPlan>()
+            val elementAliasPlans = mutableListOf<ElementAliasPlan>()
+            val elementMutationPlans = mutableListOf<ElementMutationPlan>()
+            val elementReadPlans = mutableListOf<ElementReadLiftPlan>()
             var complete = true
             calls.forEach { call ->
                 val kind = kinds.getValue(call)
                 val variable = call.parentNode.orElse(null) as? VariableDeclarator
-                val plan: FilePlan? = if (variable != null && variable.initializer.orElse(null) === call) {
+                val plan: FilePlan? = if (call.nameAsString == "getOrCreateTagElement") {
+                    planElement(call, variable, kind, exact, index, projectTagEffects)
+                } else if (variable != null && variable.initializer.orElse(null) === call) {
                     planAlias(call, variable, kind, exact, index, projectTagEffects)
                 } else {
                     planDirect(call, kind, exact, index, projectTagEffects)
@@ -128,6 +175,9 @@ internal class ExactLegacyCustomDataMigration {
                 when (plan) {
                     is AliasPlan -> aliasPlans += plan
                     is DirectPlan -> directPlans += plan
+                    is ElementAliasPlan -> elementAliasPlans += plan
+                    is ElementMutationPlan -> elementMutationPlans += plan
+                    is ElementReadLiftPlan -> elementReadPlans += plan
                     else -> complete = false
                 }
             }
@@ -156,6 +206,106 @@ internal class ExactLegacyCustomDataMigration {
                             writeBackStatement(effectiveReceiver.toString(), plan.variable.nameAsString)
                         )
                     }
+            }
+            elementAliasPlans.forEach { plan ->
+                insertBefore(
+                    plan.declarationStatement,
+                    StaticJavaParser.parseStatement(
+                        "$ITEM_STACK ${plan.ownerName} = ${plan.receiver};"
+                    )
+                )
+                insertBefore(
+                    plan.declarationStatement,
+                    StaticJavaParser.parseStatement(
+                        "String ${plan.keyName} = ${plan.call.arguments.single()};"
+                    )
+                )
+                insertBefore(
+                    plan.declarationStatement,
+                    StaticJavaParser.parseStatement(
+                        "net.minecraft.nbt.CompoundTag ${plan.rootName} = " +
+                            "${detachedTag(NameExpr(plan.ownerName))};"
+                    )
+                )
+                plan.call.replace(
+                    StaticJavaParser.parseExpression(
+                        "${plan.rootName}.getCompound(${plan.keyName})"
+                    )
+                )
+                insertAfter(
+                    plan.declarationStatement,
+                    attachElementStatement(
+                        plan.ownerName,
+                        plan.rootName,
+                        plan.keyName,
+                        plan.variable.nameAsString
+                    )
+                )
+                plan.mutationStatements
+                    .distinctBy { System.identityHashCode(it) }
+                    .sortedByDescending {
+                        it.range.map { range -> range.begin.line * 10000 + range.begin.column }
+                            .orElse(-1)
+                    }
+                    .forEach { statement ->
+                        insertAfter(
+                            statement,
+                            attachElementStatement(
+                                plan.ownerName,
+                                plan.rootName,
+                                plan.keyName,
+                                plan.variable.nameAsString
+                            )
+                        )
+                    }
+            }
+            elementMutationPlans.forEach { plan ->
+                val migrated =
+                    "$CUSTOM_DATA.update($DATA_COMPONENTS.CUSTOM_DATA, ${plan.receiver}, " +
+                        "${plan.rootName} -> { String ${plan.keyName} = ${plan.keyExpression}; " +
+                        "net.minecraft.nbt.CompoundTag ${plan.childName} = " +
+                        "${plan.rootName}.getCompound(${plan.keyName}); " +
+                        "${plan.mutationExpression}; " +
+                        "${plan.rootName}.put(${plan.keyName}, ${plan.childName}); })"
+                plan.statement.setExpression(StaticJavaParser.parseExpression(migrated))
+            }
+            elementReadPlans.forEach { plan ->
+                insertBeforeStatement(
+                    plan.anchor,
+                    StaticJavaParser.parseStatement(
+                        "$ITEM_STACK ${plan.ownerName} = ${plan.receiver};"
+                    )
+                )
+                insertBeforeStatement(
+                    plan.anchor,
+                    StaticJavaParser.parseStatement(
+                        "String ${plan.keyName} = ${plan.keyExpression};"
+                    )
+                )
+                insertBeforeStatement(
+                    plan.anchor,
+                    StaticJavaParser.parseStatement(
+                        "net.minecraft.nbt.CompoundTag ${plan.rootName} = " +
+                            "${detachedTag(NameExpr(plan.ownerName))};"
+                    )
+                )
+                insertBeforeStatement(
+                    plan.anchor,
+                    StaticJavaParser.parseStatement(
+                        "net.minecraft.nbt.CompoundTag ${plan.childName} = " +
+                            "${plan.rootName}.getCompound(${plan.keyName});"
+                    )
+                )
+                insertBeforeStatement(
+                    plan.anchor,
+                    attachElementStatement(
+                        plan.ownerName,
+                        plan.rootName,
+                        plan.keyName,
+                        plan.childName
+                    )
+                )
+                plan.call.replace(NameExpr(plan.childName))
             }
             directPlans.forEach { plan ->
                 when (plan) {
@@ -247,6 +397,103 @@ internal class ExactLegacyCustomDataMigration {
             declarationStatement = declaration,
             ownerName = ownerName,
             mutationStatements = classified.mapNotNull { it.mutationStatement }
+        )
+    }
+
+    private fun planElement(
+        call: MethodCallExpr,
+        variable: VariableDeclarator?,
+        kind: ReceiverKind,
+        exact: ExactJavaSemantics,
+        index: JavaProjectTypeIndex,
+        projectTagEffects: ExactProjectTagEffects
+    ): FilePlan? {
+        if (kind != ReceiverKind.ITEM_STACK || call.arguments.size != 1) return null
+        val receiver = call.scope.get()
+        if (variable != null && variable.initializer.orElse(null) === call) {
+            if (!exact.exactTypeReference(
+                    variable.typeAsString,
+                    "CompoundTag",
+                    "net.minecraft.nbt.CompoundTag"
+                )
+            ) {
+                return null
+            }
+            val declaration = variable.parentNode.orElse(null)
+                ?.parentNode
+                ?.orElse(null) as? ExpressionStmt ?: return null
+            if (declaration.parentNode.orElse(null) !is BlockStmt &&
+                declaration.parentNode.orElse(null) !is SwitchEntry
+            ) {
+                return null
+            }
+            val classified = exact.referencesTo(variable).map {
+                classifyAliasUse(it, exact, index, projectTagEffects)
+            }
+            if (classified.any { !it.supported }) return null
+            return ElementAliasPlan(
+                call = call,
+                variable = variable,
+                receiver = receiver,
+                declarationStatement = declaration,
+                ownerName = uniqueName(call, "modPorterCustomDataOwner"),
+                keyName = uniqueName(call, "modPorterCustomDataKey"),
+                rootName = uniqueName(call, "modPorterCustomDataRoot"),
+                mutationStatements = classified.mapNotNull { it.mutationStatement }
+            )
+        }
+
+        val chain = receiverChain(call)
+        if (chain?.effect == ExactExternalTagContracts.Effect.MUTATE) {
+            val statement = standaloneStatement(chain.outermost) ?: return null
+            val childName = uniqueName(call, "modPorterCustomDataChild")
+            return ElementMutationPlan(
+                call = call,
+                receiver = receiver,
+                statement = statement,
+                keyExpression = call.arguments.single(),
+                keyName = uniqueName(call, "modPorterCustomDataKey"),
+                rootName = uniqueName(call, "modPorterCustomDataRoot"),
+                childName = childName,
+                mutationExpression = expressionWithCallReplacement(
+                    chain.outermost,
+                    call,
+                    childName,
+                    "getOrCreateTagElement"
+                )
+            )
+        }
+
+        val parentCall = call.parentNode.orElse(null) as? MethodCallExpr ?: return null
+        if (parentCall.arguments.size != 1 ||
+            parentCall.arguments.single() !== call ||
+            parentCall.scope.isPresent
+        ) {
+            return null
+        }
+        val effect = argumentEffect(
+            parentCall,
+            0,
+            exact,
+            index,
+            projectTagEffects
+        )
+        if (effect != ExactExternalTagContracts.Effect.READ) return null
+        val anchor = parentCall.findAncestor(Statement::class.java).orElse(null) ?: return null
+        if (anchor.parentNode.orElse(null) !is BlockStmt &&
+            anchor.parentNode.orElse(null) !is SwitchEntry
+        ) {
+            return null
+        }
+        return ElementReadLiftPlan(
+            call = call,
+            receiver = receiver,
+            anchor = anchor,
+            keyExpression = call.arguments.single(),
+            ownerName = uniqueName(call, "modPorterCustomDataOwner"),
+            keyName = uniqueName(call, "modPorterCustomDataKey"),
+            rootName = uniqueName(call, "modPorterCustomDataRoot"),
+            childName = uniqueName(call, "modPorterCustomDataChild")
         )
     }
 
@@ -503,18 +750,29 @@ internal class ExactLegacyCustomDataMigration {
         expression: MethodCallExpr,
         originalCall: MethodCallExpr,
         tagName: String
+    ): String = expressionWithCallReplacement(
+        expression,
+        originalCall,
+        tagName,
+        "getOrCreateTag"
+    )
+
+    private fun expressionWithCallReplacement(
+        expression: MethodCallExpr,
+        originalCall: MethodCallExpr,
+        replacementName: String,
+        methodName: String
     ): String {
         val clone = expression.clone()
         val originalRange = originalCall.range.orElse(null)
         val candidates = clone.findAll(MethodCallExpr::class.java).filter {
-            it.nameAsString == "getOrCreateTag" &&
-                it.arguments.isEmpty() &&
+            it.nameAsString == methodName &&
                 (originalRange == null || it.range.orElse(null) == originalRange)
         }
         val target = candidates.singleOrNull() ?: throw IllegalStateException(
-            "Cannot bind exact getOrCreateTag node inside '$expression'"
+            "Cannot bind exact $methodName node inside '$expression'"
         )
-        target.replace(NameExpr(tagName))
+        target.replace(NameExpr(replacementName))
         return clone.toString()
     }
 
@@ -578,6 +836,17 @@ internal class ExactLegacyCustomDataMigration {
     private fun writeBackStatement(receiver: String, tagName: String): Statement =
         StaticJavaParser.parseStatement(writeBackCode(receiver, tagName))
 
+    private fun attachElementStatement(
+        ownerName: String,
+        rootName: String,
+        keyName: String,
+        childName: String
+    ): Statement =
+        StaticJavaParser.parseStatement(
+            "{ $rootName.put($keyName, $childName); " +
+                "${writeBackCode(ownerName, rootName)} }"
+        )
+
     private fun writeBackCode(receiver: String, tagName: String): String =
         "if (($tagName).isEmpty()) { ($receiver).remove($DATA_COMPONENTS.CUSTOM_DATA); } " +
             "else { ($receiver).set($DATA_COMPONENTS.CUSTOM_DATA, $CUSTOM_DATA.of($tagName)); }"
@@ -636,6 +905,22 @@ internal class ExactLegacyCustomDataMigration {
                 parent.statements.add(index, statement)
             }
             else -> throw IllegalStateException("Custom-data alias is outside an ordered statement list")
+        }
+    }
+
+    private fun insertBeforeStatement(anchor: Statement, statement: Statement) {
+        when (val parent = anchor.parentNode.orElse(null)) {
+            is BlockStmt -> {
+                val index = parent.statements.indexOfIdentity(anchor)
+                if (index < 0) throw IllegalStateException("Cannot locate lifted tag-element statement")
+                parent.statements.add(index, statement)
+            }
+            is SwitchEntry -> {
+                val index = parent.statements.indexOfIdentity(anchor)
+                if (index < 0) throw IllegalStateException("Cannot locate lifted switch tag-element statement")
+                parent.statements.add(index, statement)
+            }
+            else -> throw IllegalStateException("Lifted tag element is outside an ordered statement list")
         }
     }
 

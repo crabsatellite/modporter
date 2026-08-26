@@ -61,6 +61,11 @@ class ExactLegacyCustomDataGeneratedCompileTest {
                     tag.putInt("Count", 1);
                 }
 
+                void element(ItemStack stack) {
+                    CompoundTag child = stack.getOrCreateTagElement("Child");
+                    child.putInt("Count", 1);
+                }
+
                 enum Mode {
                     FIRST
                 }
@@ -149,6 +154,13 @@ class ExactLegacyCustomDataGeneratedCompileTest {
                 }
 
                 public void putInt(String key, int value) {
+                }
+
+                public CompoundTag getCompound(String key) {
+                    return new CompoundTag();
+                }
+
+                public void put(String key, CompoundTag value) {
                 }
 
                 public boolean isEmpty() {

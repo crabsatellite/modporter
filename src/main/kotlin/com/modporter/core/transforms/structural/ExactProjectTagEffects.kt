@@ -55,14 +55,75 @@ internal class ExactProjectTagEffects(
         call: MethodCallExpr,
         argumentIndex: Int
     ): ExactExternalTagContracts.Effect? {
-        val method = exactTarget(call) ?: return null
-        val parameter = method.parameters.getOrNull(argumentIndex) ?: return null
+        val (method, parameter) = exactTargetParameter(call, argumentIndex) ?: return null
         if (index.declaredType(parameter.type, method) != COMPOUND_TAG) return null
         return when (parameterState(method, parameter)) {
             State.READ -> ExactExternalTagContracts.Effect.READ
             State.MUTATE -> ExactExternalTagContracts.Effect.MUTATE
             else -> null
         }
+    }
+
+    private fun exactTargetParameter(
+        call: MethodCallExpr,
+        argumentIndex: Int
+    ): Pair<MethodDeclaration, Parameter>? {
+        exactTarget(call)?.let { method ->
+            method.parameters.getOrNull(argumentIndex)?.let { parameter ->
+                if (index.declaredType(parameter.type, method) == COMPOUND_TAG) {
+                    return method to parameter
+                }
+            }
+        }
+
+        val owner = index.projectMethodOwner(call, call.arguments.size)
+            ?: call.takeIf { it.scope.isEmpty }
+                ?.findAncestor(ClassOrInterfaceDeclaration::class.java)
+                ?.flatMap { it.fullyQualifiedName }
+                ?.orElse(null)
+            ?: return null
+        val expanded = methodsByKey[
+            MethodKey(owner, call.nameAsString, call.arguments.size + 1)
+        ].orEmpty().mapNotNull { method ->
+            val providerIndices = method.parameters.indices.filter { parameterIndex ->
+                index.declaredType(method.parameters[parameterIndex].type, method) ==
+                    HOLDER_LOOKUP_PROVIDER
+            }
+            val providerIndex = providerIndices.singleOrNull() ?: return@mapNotNull null
+            val nonProviderParameters = method.parameters.filterIndexed { index, _ ->
+                index != providerIndex
+            }
+            val expectedTypes = nonProviderParameters.map { parameter ->
+                index.declaredType(parameter.type, method) ?: return@mapNotNull null
+            }
+            val callerCu = call.findCompilationUnit().orElse(null) ?: return@mapNotNull null
+            val callerExact = ExactJavaSemantics(callerCu)
+            val argumentsMatch = call.arguments.zip(expectedTypes).all { (argument, expected) ->
+                val legacyTagElement = (argument as? MethodCallExpr)?.let { tagCall ->
+                    expected == COMPOUND_TAG &&
+                        tagCall.nameAsString == "getOrCreateTagElement" &&
+                        tagCall.arguments.size == 1 &&
+                        tagCall.scope.map { ownerExpression ->
+                            callerExact.isProvablyType(
+                                ownerExpression,
+                                "ItemStack",
+                                ITEM_STACK
+                            ) || index.isExpressionAssignableTo(
+                                ownerExpression,
+                                tagCall,
+                                ITEM_STACK
+                            )
+                        }.orElse(false)
+                } == true
+                legacyTagElement ||
+                    index.isExpressionAssignableTo(argument, call, expected)
+            }
+            if (!argumentsMatch) return@mapNotNull null
+            val parameter = nonProviderParameters.getOrNull(argumentIndex)
+                ?: return@mapNotNull null
+            method to parameter
+        }
+        return expanded.singleOrNull()
     }
 
     private fun exactTarget(call: MethodCallExpr): MethodDeclaration? {
@@ -172,6 +233,8 @@ internal class ExactProjectTagEffects(
 
     private companion object {
         const val COMPOUND_TAG = "net.minecraft.nbt.CompoundTag"
+        const val HOLDER_LOOKUP_PROVIDER = "net.minecraft.core.HolderLookup.Provider"
+        const val ITEM_STACK = "net.minecraft.world.item.ItemStack"
         val NESTED_TAG_GETTERS = setOf("get", "getCompound", "getList")
     }
 }
