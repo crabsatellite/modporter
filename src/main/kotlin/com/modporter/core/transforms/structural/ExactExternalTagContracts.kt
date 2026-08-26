@@ -59,6 +59,16 @@ internal object ExactExternalTagContracts {
         ) {
             return Effect.READ
         }
+        if (call.nameAsString == "setTag" &&
+            argumentIndex == 0 &&
+            call.arguments.size == 1
+        ) {
+            val scope = call.scope.orElse(null)
+            val itemStackReceiver = scope != null &&
+                (exact.isProvablyType(scope, "ItemStack", ITEM_STACK) ||
+                    typeIndex?.isExpressionAssignableTo(scope, call, ITEM_STACK) == true)
+            if (itemStackReceiver) return Effect.READ
+        }
         if (call.nameAsString == "put" &&
             argumentIndex == 1 &&
             call.arguments.size == 2

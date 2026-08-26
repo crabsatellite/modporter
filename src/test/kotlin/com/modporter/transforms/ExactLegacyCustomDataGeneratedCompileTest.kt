@@ -66,6 +66,10 @@ class ExactLegacyCustomDataGeneratedCompileTest {
                     child.putInt("Count", 1);
                 }
 
+                void setTag(ItemStack stack, CompoundTag tag) {
+                    stack.setTag(tag);
+                }
+
                 enum Mode {
                     FIRST
                 }

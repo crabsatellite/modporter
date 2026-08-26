@@ -109,6 +109,15 @@ internal class ExactLegacyCustomDataMigration {
         val childName: String
     ) : FilePlan
 
+    private data class SetTagPlan(
+        val call: MethodCallExpr,
+        val receiver: Expression,
+        val statement: ExpressionStmt,
+        val tagExpression: Expression,
+        val ownerName: String,
+        val tagName: String
+    ) : FilePlan
+
     private data class AliasUse(
         val supported: Boolean,
         val mutationStatement: ExpressionStmt? = null
@@ -127,7 +136,8 @@ internal class ExactLegacyCustomDataMigration {
                 .filter {
                     val source = it.readText()
                     source.contains(".getOrCreateTag(") ||
-                        source.contains(".getOrCreateTagElement(")
+                        source.contains(".getOrCreateTagElement(") ||
+                        source.contains(".setTag(")
                 }
                 .toList()
         }
@@ -149,7 +159,8 @@ internal class ExactLegacyCustomDataMigration {
                 .filter {
                     ((it.nameAsString == "getOrCreateTag" && it.arguments.isEmpty()) ||
                         (it.nameAsString == "getOrCreateTagElement" &&
-                            it.arguments.size == 1)) &&
+                            it.arguments.size == 1) ||
+                        (it.nameAsString == "setTag" && it.arguments.size == 1)) &&
                         it.scope.isPresent
                 }
                 .filter { call ->
@@ -163,11 +174,14 @@ internal class ExactLegacyCustomDataMigration {
             val elementAliasPlans = mutableListOf<ElementAliasPlan>()
             val elementMutationPlans = mutableListOf<ElementMutationPlan>()
             val elementReadPlans = mutableListOf<ElementReadLiftPlan>()
+            val setTagPlans = mutableListOf<SetTagPlan>()
             var complete = true
             calls.forEach { call ->
                 val kind = kinds.getValue(call)
                 val variable = call.parentNode.orElse(null) as? VariableDeclarator
-                val plan: FilePlan? = if (call.nameAsString == "getOrCreateTagElement") {
+                val plan: FilePlan? = if (call.nameAsString == "setTag") {
+                    planSetTag(call, kind)
+                } else if (call.nameAsString == "getOrCreateTagElement") {
                     planElement(call, variable, kind, exact, index, projectTagEffects)
                 } else if (variable != null && variable.initializer.orElse(null) === call) {
                     planAlias(call, variable, kind, exact, index, projectTagEffects)
@@ -180,6 +194,7 @@ internal class ExactLegacyCustomDataMigration {
                     is ElementAliasPlan -> elementAliasPlans += plan
                     is ElementMutationPlan -> elementMutationPlans += plan
                     is ElementReadLiftPlan -> elementReadPlans += plan
+                    is SetTagPlan -> setTagPlans += plan
                     else -> complete = false
                 }
             }
@@ -308,6 +323,16 @@ internal class ExactLegacyCustomDataMigration {
                     )
                 )
                 plan.call.replace(NameExpr(plan.childName))
+            }
+            setTagPlans.forEach { plan ->
+                val migrated =
+                    "net.minecraft.Util.make(${plan.receiver}, ${plan.ownerName} -> { " +
+                        "net.minecraft.nbt.CompoundTag ${plan.tagName} = ${plan.tagExpression}; " +
+                        "if (${plan.tagName} == null) { " +
+                        "${plan.ownerName}.remove($DATA_COMPONENTS.CUSTOM_DATA); } else { " +
+                        "${plan.ownerName}.set($DATA_COMPONENTS.CUSTOM_DATA, " +
+                        "$CUSTOM_DATA.of(${plan.tagName})); } })"
+                plan.statement.setExpression(StaticJavaParser.parseExpression(migrated))
             }
             directPlans.forEach { plan ->
                 when (plan) {
@@ -496,6 +521,22 @@ internal class ExactLegacyCustomDataMigration {
             keyName = uniqueName(call, "modPorterCustomDataKey"),
             rootName = uniqueName(call, "modPorterCustomDataRoot"),
             childName = uniqueName(call, "modPorterCustomDataChild")
+        )
+    }
+
+    private fun planSetTag(
+        call: MethodCallExpr,
+        kind: ReceiverKind
+    ): SetTagPlan? {
+        if (kind != ReceiverKind.ITEM_STACK || call.arguments.size != 1) return null
+        val statement = standaloneStatement(call) ?: return null
+        return SetTagPlan(
+            call = call,
+            receiver = call.scope.get(),
+            statement = statement,
+            tagExpression = call.arguments.single(),
+            ownerName = uniqueName(call, "modPorterCustomDataOwner"),
+            tagName = uniqueName(call, "modPorterCustomDataValue")
         )
     }
 

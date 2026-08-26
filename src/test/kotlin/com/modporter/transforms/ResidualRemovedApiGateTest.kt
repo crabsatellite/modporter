@@ -117,6 +117,10 @@ class ResidualRemovedApiGateTest {
                     return stack.getOrCreateTagElement("Child").getInt("Count");
                 }
 
+                void set(ItemStack stack, CompoundTag tag) {
+                    stack.setTag(tag);
+                }
+
                 int lookalike(Box stack) {
                     return stack.getOrCreateTag().getInt("Count");
                 }
@@ -136,12 +140,13 @@ class ResidualRemovedApiGateTest {
 
         val findings = ResidualRemovedApiGate.scan(tempDir)
 
-        assertEquals(2, findings.size, findings.joinToString("\n"))
+        assertEquals(3, findings.size, findings.joinToString("\n"))
         assertTrue(findings.any { it.contains("ItemStack/FluidStack.getOrCreateTag API") }, findings.toString())
         assertTrue(
             findings.any { it.contains("ItemStack/FluidStack.getOrCreateTagElement API") },
             findings.toString()
         )
+        assertTrue(findings.any { it.contains("ItemStack/FluidStack.setTag API") }, findings.toString())
         assertTrue(
             findings.all { it.endsWith("src/main/java/com/example/ResidualTags.java") },
             findings.toString()

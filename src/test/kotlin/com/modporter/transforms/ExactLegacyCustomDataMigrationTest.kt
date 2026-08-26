@@ -298,6 +298,54 @@ class ExactLegacyCustomDataMigrationTest {
     }
 
     @Test
+    fun `legacy set tag preserves receiver argument and null evaluation order`() {
+        val source = writeJava(
+            "SetTagCalls.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            class SetTagCalls {
+                void clear(ItemStack stack) {
+                    stack.setTag(null);
+                }
+
+                void replace(ItemStack stack, CompoundTag value) {
+                    stack.setTag(value);
+                }
+
+                void live(ItemStack stack) {
+                    CompoundTag tag = stack.getOrCreateTag();
+                    tag.putInt("Count", 1);
+                    stack.setTag(tag);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val changes = ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val migrated = source.readText()
+
+        assertEquals(1, changes.size, migrated)
+        assertTrue(!migrated.contains("setTag("), migrated)
+        assertTrue(!migrated.contains("getOrCreateTag"), migrated)
+        assertEquals(
+            3,
+            Regex("""net\.minecraft\.Util\.make\(stack""").findAll(migrated).count(),
+            migrated
+        )
+        assertTrue(migrated.contains("modPorterCustomDataValue == null"), migrated)
+        assertTrue(
+            migrated.contains(
+                "net.minecraft.world.item.component.CustomData.of(modPorterCustomDataValue)"
+            ),
+            migrated
+        )
+    }
+
+    @Test
     fun `tag elements preserve attachment mutation and read lift semantics`() {
         val local = writeJava(
             "LocalTagElement.java",
@@ -643,6 +691,52 @@ class ExactLegacyCustomDataMigrationTest {
         assertEquals(1, changes.size, migrated)
         assertTrue(!migrated.contains("getOrCreateTag"), migrated)
         assertTrue(migrated.contains("menu.contentHolder).getOrDefault"), migrated)
+    }
+
+    @Test
+    fun `closed vanilla item stack accessor contracts prove method receivers`() {
+        val source = writeJava(
+            "VanillaItemStackAccessors.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.item.ItemEntity;
+            import net.minecraft.world.item.context.UseOnContext;
+
+            class VanillaItemStackAccessors {
+                void context(UseOnContext context) {
+                    CompoundTag tag = context.getItemInHand().getOrCreateTag();
+                    tag.putInt("Count", 1);
+                }
+
+                int entity(ItemEntity entity) {
+                    CompoundTag tag = entity.getItem().getOrCreateTag();
+                    return tag.getInt("Count");
+                }
+            }
+            """.trimIndent()
+        )
+
+        val changes = ExactLegacyCustomDataMigration().migrate(tempDir, dryRun = false)
+        val migrated = source.readText()
+
+        assertEquals(1, changes.size, migrated)
+        assertTrue(!migrated.contains("getOrCreateTag"), migrated)
+        assertTrue(
+            migrated.contains(
+                "net.minecraft.world.item.ItemStack modPorterCustomDataOwner = " +
+                    "context.getItemInHand();"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "net.minecraft.world.item.ItemStack modPorterCustomDataOwner = " +
+                    "entity.getItem();"
+            ),
+            migrated
+        )
     }
 
     @Test

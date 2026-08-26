@@ -1812,6 +1812,12 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 ("getMainHandItem" to 0) to TypeRef("net.minecraft.world.item.ItemStack"),
                 ("getCommandSenderWorld" to 0) to TypeRef("net.minecraft.world.level.Level")
             ),
+            "net.minecraft.world.entity.item.ItemEntity" to mapOf(
+                ("getItem" to 0) to TypeRef("net.minecraft.world.item.ItemStack")
+            ),
+            "net.minecraft.world.item.context.UseOnContext" to mapOf(
+                ("getItemInHand" to 0) to TypeRef("net.minecraft.world.item.ItemStack")
+            ),
             "net.minecraft.world.level.storage.loot.LootParams.Builder" to mapOf(
                 ("getLevel" to 0) to TypeRef("net.minecraft.server.level.ServerLevel")
             ),

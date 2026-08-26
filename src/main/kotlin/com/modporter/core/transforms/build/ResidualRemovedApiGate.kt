@@ -73,6 +73,7 @@ internal object ResidualRemovedApiGate {
             source.contains("Potion.byName") ||
             source.contains(".getOrCreateTag(") ||
             source.contains(".getOrCreateTagElement(") ||
+            source.contains(".setTag(") ||
             source.contains("$POTIONS.EMPTY") ||
             source.contains("$POTION.byName")
 
@@ -109,7 +110,11 @@ internal object ResidualRemovedApiGate {
 
         cu.findAll(MethodCallExpr::class.java).forEach { call ->
             val scope = call.scope.orElse(null) ?: return@forEach
-            if (call.nameAsString in setOf("getOrCreateTag", "getOrCreateTagElement") &&
+            if (call.nameAsString in setOf(
+                    "getOrCreateTag",
+                    "getOrCreateTagElement",
+                    "setTag"
+                ) &&
                 call.arguments.size == (if (call.nameAsString == "getOrCreateTag") 0 else 1) &&
                 (exact.isProvablyType(scope, "ItemStack", ITEM_STACK) ||
                     exact.isProvablyType(scope, "FluidStack", FLUID_STACKS) ||
