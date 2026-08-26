@@ -2819,6 +2819,7 @@ $migratedRecipes
             }
 
         result = migrateLegacyPotionUtilsCalls(result)
+        result = migrateRemovedEmptyPotionRegistryGuards(result)
         result = migrateLegacyPotionEmptyStringChecks(result)
 
         result = migrateUseOnContextDataComponentHasCalls(result)

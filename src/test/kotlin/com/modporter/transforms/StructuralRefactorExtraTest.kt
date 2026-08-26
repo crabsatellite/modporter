@@ -21122,8 +21122,23 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
         assertTrue(potion.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"))
         assertTrue(potion.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
-        assertTrue(potion.contains("!(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().iterator().hasNext()"))
-        assertTrue(potion.contains("for (MobEffectInstance effect : (stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects())"))
+        assertTrue(
+            Regex(
+                """net\.minecraft\.Util\.make\(new java\.util\.ArrayList<""" +
+                    """net\.minecraft\.world\.effect\.MobEffectInstance>\(\),[\s\S]*?\)\.isEmpty\(\)"""
+            ).containsMatchIn(potion),
+            potion
+        )
+        assertTrue(
+            potion.contains(
+                "for (MobEffectInstance effect : net.minecraft.Util.make(" +
+                    "new java.util.ArrayList<net.minecraft.world.effect.MobEffectInstance>()"
+            ),
+            potion
+        )
+        assertTrue(potion.contains(".addAll(modPorterPotionContents"), potion)
+        assertTrue(potion.contains(".customEffects());"), potion)
+        assertFalse(potion.contains(".getAllEffects()"), potion)
         assertTrue(potion.contains("(stack).update(DataComponents.POTION_CONTENTS, PotionContents.EMPTY"))
         assertTrue(potion.contains("new PotionContents(java.util.Optional.empty()"))
         assertTrue(!potion.contains("stack.set(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)"))
@@ -44741,6 +44756,10 @@ $suppliers
                     return PotionUtils.getColor((ItemStack) stack);
                 }
 
+                int methodColor(ItemStack stack) {
+                    return PotionUtils.getColor(nextStack(stack));
+                }
+
                 boolean water(ItemStack stack) {
                     return Potions.WATER == PotionUtils.getPotion(stack);
                 }
@@ -44775,6 +44794,10 @@ $suppliers
                 Potion next(Potion potion) {
                     return potion;
                 }
+
+                ItemStack nextStack(ItemStack stack) {
+                    return stack;
+                }
             }
         """.trimIndent())
 
@@ -44802,12 +44825,9 @@ $suppliers
         val migrated = exact.readText()
 
         assertTrue(
-            Regex(
-                """net\.minecraft\.Util\.make\(new ItemStack\(Items\.POTION\),\s*""" +
-                    """modPorterPotionStack\d*\s*->\s*modPorterPotionStack\d*\.update\(""" +
-                    """DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY,\s*next\(potion\),\s*""" +
-                    """PotionContents::withPotion\)\)"""
-            ).containsMatchIn(migrated),
+            migrated.contains(
+                "return PotionUtils.setPotion(new ItemStack(Items.POTION), next(potion));"
+            ),
             migrated
         )
         assertTrue(!migrated.contains("PotionContents.createItemStack"), migrated)
@@ -44830,11 +44850,15 @@ $suppliers
         )
         assertTrue(migrated.contains("result.clear();"), migrated)
         assertTrue(
-            migrated.contains(
-                "java.util.stream.StreamSupport.stream((stack).getOrDefault(" +
-                    "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().spliterator(), false)" +
-                    ".collect(java.util.stream.Collectors.toCollection(java.util.ArrayList::new))"
-            ),
+            Regex(
+                """List<MobEffectInstance> result = net\.minecraft\.Util\.make\(""" +
+                    """new java\.util\.ArrayList<""" +
+                    """net\.minecraft\.world\.effect\.MobEffectInstance>\(\),\s*""" +
+                    """modPorterPotionEffects\d* -> \{[\s\S]*?PotionContents modPorterPotionContents\d* = """ +
+                    """\(stack\)\.getOrDefault\(DataComponents\.POTION_CONTENTS, PotionContents\.EMPTY\);[\s\S]*?""" +
+                    """modPorterPotionContents\d*\.potion\(\)\.ifPresent\([\s\S]*?""" +
+                    """modPorterPotionEffects\d*\.addAll\(modPorterPotionContents\d*\.customEffects\(\)\);[\s\S]*?\}\)"""
+            ).containsMatchIn(migrated),
             migrated
         )
         assertTrue(
@@ -44864,6 +44888,13 @@ $suppliers
         assertTrue(
             migrated.contains(
                 "((ItemStack) stack).getOrDefault(" +
+                    "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "(nextStack(stack)).getOrDefault(" +
                     "DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"
             ),
             migrated
@@ -45030,5 +45061,237 @@ $suppliers
         StructuralRefactorPass().apply(tempDir)
 
         assertEquals(original, source.readText())
+    }
+
+    @Test
+    fun `potion receiver types follow lexical loop catch and resource bindings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("LexicalPotionBindings.java")
+        source.writeText("""
+            package com.example;
+
+            import java.util.Collection;
+            import java.util.List;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.alchemy.PotionUtils;
+
+            class LexicalPotionBindings {
+                ItemStack stack;
+                java.util.function.ToIntFunction<List<MobEffectInstance>> lambda =
+                    stack -> PotionUtils.getColor(stack);
+
+                int field() {
+                    return PotionUtils.getColor(stack);
+                }
+
+                int exactLoop(Iterable<ItemStack> values) {
+                    for (ItemStack stack : values) {
+                        return PotionUtils.getColor(stack);
+                    }
+                    return 0;
+                }
+
+                int collectionLoop(Iterable<List<MobEffectInstance>> values) {
+                    for (List<MobEffectInstance> stack : values) {
+                        return PotionUtils.getColor(stack);
+                    }
+                    return 0;
+                }
+
+                int caught() {
+                    try {
+                        mayFail();
+                        return 0;
+                    } catch (ColorException stack) {
+                        return PotionUtils.getColor(stack);
+                    }
+                }
+
+                int resource() throws Exception {
+                    try (ColorResource stack = open()) {
+                        return PotionUtils.getColor(stack);
+                    }
+                }
+
+                void mayFail() throws ColorException {
+                }
+
+                ColorResource open() {
+                    return null;
+                }
+
+                abstract static class ColorException extends Exception
+                    implements Collection<MobEffectInstance> {
+                }
+
+                abstract static class ColorResource
+                    implements AutoCloseable, Collection<MobEffectInstance> {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = source.readText()
+
+        assertEquals(
+            2,
+            Regex("""\.getOrDefault\(DataComponents\.POTION_CONTENTS""")
+                .findAll(migrated)
+                .count(),
+            migrated
+        )
+        assertEquals(4, Regex("""PotionUtils\.getColor\(stack\)""").findAll(migrated).count(), migrated)
+        assertTrue(migrated.contains("for (List<MobEffectInstance> stack : values)"), migrated)
+        assertTrue(migrated.contains("catch (ColorException stack)"), migrated)
+        assertTrue(migrated.contains("try (ColorResource stack = open())"), migrated)
+    }
+
+    @Test
+    fun `potion value graph rewrites only references bound to one declaration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("ScopedPotionValues.java")
+        source.writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.alchemy.Potion;
+            import net.minecraft.world.item.alchemy.PotionUtils;
+            import net.minecraft.world.item.alchemy.Potions;
+
+            class ScopedPotionValues {
+                boolean siblingBlocks(ItemStack stack) {
+                    boolean first;
+                    {
+                        Potion potion = PotionUtils.getPotion(stack);
+                        first = potion == Potions.WATER;
+                    }
+                    {
+                        Potion potion = Potions.WATER;
+                        return first && potion == Potions.WATER;
+                    }
+                }
+
+                boolean unsupportedUse(ItemStack stack) {
+                    Potion potion = PotionUtils.getPotion(stack);
+                    boolean water = potion == Potions.WATER;
+                    return water && consume(potion);
+                }
+
+                boolean consume(Potion potion) {
+                    return potion != Potions.EMPTY;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = source.readText()
+
+        assertTrue(
+            migrated.contains(
+                "java.util.Optional<net.minecraft.core.Holder<" +
+                    "net.minecraft.world.item.alchemy.Potion>> potion = " +
+                    "(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion();"
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("Potion potion = Potions.WATER;"), migrated)
+        assertTrue(migrated.contains("return first && potion == Potions.WATER;"), migrated)
+        assertTrue(migrated.contains("Potion potion = PotionUtils.getPotion(stack);"), migrated)
+        assertTrue(migrated.contains("boolean water = potion == Potions.WATER;"), migrated)
+        assertTrue(migrated.contains("return water && consume(potion);"), migrated)
+    }
+
+    @Test
+    fun `empty potion guard is removed only from exact built in registry iteration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val source = srcDir.resolve("PotionRegistryLoops.java")
+        source.writeText("""
+            package com.example;
+
+            import java.util.List;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.item.alchemy.Potion;
+            import net.minecraft.world.item.alchemy.Potions;
+
+            class PotionRegistryLoops {
+                void materialized() {
+                    for (Potion potion : BuiltInRegistries.POTION.stream().toList()) {
+                        if (potion == Potions.EMPTY) {
+                            continue;
+                        }
+                        consume(potion);
+                    }
+                }
+
+                void directStream() {
+                    for (Potion potion : BuiltInRegistries.POTION.stream()) {
+                        if (Potions.EMPTY == potion)
+                            continue;
+                        consume(potion);
+                    }
+                }
+
+                void arbitrary(List<Potion> values) {
+                    for (Potion potion : values) {
+                        if (potion == Potions.EMPTY) {
+                            continue;
+                        }
+                        consume(potion);
+                    }
+                }
+
+                void labelled() {
+                    outer:
+                    for (Potion potion : BuiltInRegistries.POTION.stream()) {
+                        if (potion == Potions.EMPTY) {
+                            continue outer;
+                        }
+                        consume(potion);
+                    }
+                }
+
+                void compound() {
+                    for (Potion potion : BuiltInRegistries.POTION.stream()) {
+                        if (potion == Potions.EMPTY) {
+                            audit(potion);
+                            continue;
+                        }
+                        consume(potion);
+                    }
+                }
+
+                void consume(Potion potion) {
+                }
+
+                void audit(Potion potion) {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = source.readText()
+
+        assertEquals(3, Regex("""Potions\.EMPTY\s*==|==\s*Potions\.EMPTY""").findAll(migrated).count(), migrated)
+        assertTrue(
+            migrated.contains(
+                "for (Potion potion : BuiltInRegistries.POTION.stream().toList()) {\n" +
+                    "            consume(potion);"
+            ),
+            migrated
+        )
+        assertTrue(
+            migrated.contains(
+                "for (Potion potion : BuiltInRegistries.POTION.stream()) {\n" +
+                    "            consume(potion);"
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("for (Potion potion : values)"), migrated)
+        assertTrue(migrated.contains("continue outer;"), migrated)
+        assertTrue(migrated.contains("audit(potion);"), migrated)
     }
 }

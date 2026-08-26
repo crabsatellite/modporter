@@ -1104,8 +1104,23 @@
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
         assertTrue(potion.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"))
         assertTrue(potion.contains("(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
-        assertTrue(potion.contains("!(stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().iterator().hasNext()"))
-        assertTrue(potion.contains("for (MobEffectInstance effect : (stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects())"))
+        assertTrue(
+            Regex(
+                """net\.minecraft\.Util\.make\(new java\.util\.ArrayList<""" +
+                    """net\.minecraft\.world\.effect\.MobEffectInstance>\(\),[\s\S]*?\)\.isEmpty\(\)"""
+            ).containsMatchIn(potion),
+            potion
+        )
+        assertTrue(
+            potion.contains(
+                "for (MobEffectInstance effect : net.minecraft.Util.make(" +
+                    "new java.util.ArrayList<net.minecraft.world.effect.MobEffectInstance>()"
+            ),
+            potion
+        )
+        assertTrue(potion.contains(".addAll(modPorterPotionContents"), potion)
+        assertTrue(potion.contains(".customEffects());"), potion)
+        assertFalse(potion.contains(".getAllEffects()"), potion)
         assertTrue(potion.contains("(stack).update(DataComponents.POTION_CONTENTS, PotionContents.EMPTY"))
         assertTrue(potion.contains("new PotionContents(java.util.Optional.empty()"))
         assertTrue(!potion.contains("stack.set(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)"))
@@ -1172,27 +1187,4 @@
         assertTrue(potion.contains("return (stack).getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"), potion)
         assertTrue(potion.contains("""|| "minecraft:empty".equals(tag.getString("Potion"));"""), potion)
         assertTrue(!potion.contains("import net.minecraft.world.item.alchemy.PotionUtils;"), potion)
-    }
-
-    @Test
-    fun `migrates removed entity riding offset center expression`() {
-        val projectDir = createFile("EntityCenter.java", """
-            package com.example;
-
-            import net.minecraft.world.entity.Entity;
-            import net.minecraft.world.phys.Vec3;
-
-            public class EntityCenter {
-                public Vec3 center(Entity entity) {
-                    return new Vec3(entity.getX(), entity.getY() - entity.getMyRidingOffset() + entity.getBbHeight() / 2, entity.getZ());
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(projectDir)
-        val transformed = tempDir.resolve("src/main/java/com/example/EntityCenter.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
-        assertTrue(transformed.contains("return entity.getBoundingBox().getCenter();"))
-        assertTrue(!transformed.contains("getMyRidingOffset"))
     }

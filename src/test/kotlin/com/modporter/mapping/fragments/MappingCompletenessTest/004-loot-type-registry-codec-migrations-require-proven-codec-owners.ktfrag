@@ -892,6 +892,10 @@
             .toAbsolutePath()
             .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
             .readText()
+        val exactSemantics = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/ExactJavaSemantics.kt")
+            .readText()
         val start = source.indexOf("private fun migrateLegacyPotionUtilsCalls(source: String): String")
         assertTrue(start >= 0, "PotionUtils AST migration is missing")
         val body = source.substring(start)
@@ -920,6 +924,19 @@
                 body.contains("isProvablyItemStack") &&
                 body.contains("Cannot parse source containing legacy Minecraft PotionUtils calls"),
             "Potion component migration must prove the API owner and argument context through the Java AST"
+        )
+        assertTrue(
+            !source.contains("migrateLegacyFluidPotionComponentAliases") &&
+                source.contains(
+                    "private fun migrateRemovedEmptyPotionRegistryGuards(source: String): String"
+                ) &&
+                source.contains("iteratesBuiltInPotionRegistry(loop.iterable)") &&
+                exactSemantics.contains("internal class ExactJavaSemantics") &&
+                exactSemantics.contains("fun exactTypeReference(") &&
+                exactSemantics.contains("fun exactStaticScope(") &&
+                exactSemantics.contains("fun isProvablyType(") &&
+                exactSemantics.contains("fun referencesTo("),
+            "Potion migration must fail closed and use shared exact lexical binding and owner proofs"
         )
         assertTrue(
             source.contains("private fun migrateLegacyPotionEmptyStringChecks(source: String): String") &&

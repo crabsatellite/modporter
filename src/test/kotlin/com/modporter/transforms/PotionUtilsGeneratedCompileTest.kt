@@ -26,6 +26,7 @@ class PotionUtilsGeneratedCompileTest {
 
             import java.util.Collection;
             import java.util.List;
+            import net.minecraft.core.registries.BuiltInRegistries;
             import net.minecraft.network.chat.Component;
             import net.minecraft.world.effect.MobEffectInstance;
             import net.minecraft.world.item.ItemStack;
@@ -78,6 +79,15 @@ class PotionUtilsGeneratedCompileTest {
                 boolean storedWater(ItemStack stack) {
                     Potion potion = PotionUtils.getPotion(stack);
                     return potion == Potions.WATER;
+                }
+
+                void visitPotions() {
+                    for (Potion potion : BuiltInRegistries.POTION.stream().toList()) {
+                        if (potion == Potions.EMPTY) {
+                            continue;
+                        }
+                        potion.toString();
+                    }
                 }
 
                 void tooltip(ItemStack stack, List<Component> lines) {
@@ -176,6 +186,26 @@ class PotionUtilsGeneratedCompileTest {
             """.trimIndent()
         )
         writeJava(
+            "net/minecraft/core/registries/BuiltInRegistries.java",
+            """
+            package net.minecraft.core.registries;
+
+            import java.util.List;
+            import java.util.stream.Stream;
+            import net.minecraft.world.item.alchemy.Potion;
+
+            public final class BuiltInRegistries {
+                public static final Registry<Potion> POTION = new Registry<>();
+
+                public static final class Registry<T> {
+                    public Stream<T> stream() {
+                        return List.<T>of().stream();
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+        writeJava(
             "net/minecraft/network/chat/Component.java",
             """
             package net.minecraft.network.chat;
@@ -254,7 +284,19 @@ class PotionUtilsGeneratedCompileTest {
             """
             package net.minecraft.world.item.alchemy;
 
+            import java.util.List;
+            import java.util.Optional;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.effect.MobEffectInstance;
+
             public class Potion {
+                public static String getName(Optional<Holder<Potion>> potion, String prefix) {
+                    return prefix;
+                }
+
+                public List<MobEffectInstance> getEffects() {
+                    return List.of();
+                }
             }
             """.trimIndent()
         )
@@ -309,7 +351,7 @@ class PotionUtilsGeneratedCompileTest {
                 }
 
                 public List<MobEffectInstance> customEffects() {
-                    return customEffects;
+                    return customEffects.stream().map(MobEffectInstance::new).toList();
                 }
 
                 public PotionContents withPotion(Holder<Potion> value) {

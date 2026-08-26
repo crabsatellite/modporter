@@ -23522,6 +23522,7 @@ $migratedRecipes
             }
 
         result = migrateLegacyPotionUtilsCalls(result)
+        result = migrateRemovedEmptyPotionRegistryGuards(result)
         result = migrateLegacyPotionEmptyStringChecks(result)
 
         result = migrateUseOnContextDataComponentHasCalls(result)
@@ -65741,137 +65742,39 @@ public class ${builder.className} implements RecipeBuilder {
         LexicalPreservingPrinter.setup(cu)
 
         val potionUtilsFqn = "net.minecraft.world.item.alchemy.PotionUtils"
+        val potionFqn = "net.minecraft.world.item.alchemy.Potion"
         val potionContentsFqn = "net.minecraft.world.item.alchemy.PotionContents"
         val dataComponentsFqn = "net.minecraft.core.component.DataComponents"
         val itemStackFqn = "net.minecraft.world.item.ItemStack"
         val potionsFqn = "net.minecraft.world.item.alchemy.Potions"
-
-        fun hasExactImport(fqn: String): Boolean = cu.imports.any {
-            !it.isStatic && !it.isAsterisk && it.nameAsString == fqn
-        }
-
-        fun hasDeclaredType(simpleName: String): Boolean =
-            cu.findAll(TypeDeclaration::class.java).any { it.nameAsString == simpleName }
-
-        fun hasValueDeclaration(simpleName: String): Boolean =
-            cu.findAll(Parameter::class.java).any { it.nameAsString == simpleName } ||
-                cu.findAll(VariableDeclarator::class.java).any { it.nameAsString == simpleName }
-
-        fun exactTypeReference(typeText: String, simpleName: String, fqn: String): Boolean {
-            val normalized = typeText.replace(" ", "")
-            if (normalized == fqn) return true
-            return normalized == simpleName &&
-                hasExactImport(fqn) &&
-                !hasDeclaredType(simpleName)
-        }
-
-        fun exactStaticScope(scope: Expression, simpleName: String, fqn: String): Boolean {
-            val text = scope.toString()
-            if (text == fqn) {
-                val root = fqn.substringBefore('.')
-                return !hasDeclaredType(root) && !hasValueDeclaration(root)
-            }
-            return text == simpleName &&
-                hasExactImport(fqn) &&
-                !hasDeclaredType(simpleName) &&
-                !hasValueDeclaration(simpleName)
-        }
+        val exact = ExactJavaSemantics(cu)
 
         fun isExactPotionUtilsCall(call: MethodCallExpr): Boolean =
-            call.scope.map { exactStaticScope(it, "PotionUtils", potionUtilsFqn) }.orElse(false)
+            call.scope.map { exact.exactStaticScope(it, "PotionUtils", potionUtilsFqn) }.orElse(false)
 
         fun isExactStaticConstant(expression: Expression, simpleOwner: String, ownerFqn: String, name: String): Boolean {
             val field = expression as? FieldAccessExpr ?: return false
-            return field.nameAsString == name && exactStaticScope(field.scope, simpleOwner, ownerFqn)
+            return field.nameAsString == name &&
+                exact.exactStaticScope(field.scope, simpleOwner, ownerFqn)
         }
 
-        fun targetTypeReference(simpleName: String, fqn: String, expressionScope: Boolean): String {
-            val conflictingImport = cu.imports.any {
-                !it.isStatic && !it.isAsterisk &&
-                    it.name.identifier == simpleName &&
-                    it.nameAsString != fqn
-            }
-            val shadowed = hasDeclaredType(simpleName) ||
-                (expressionScope && hasValueDeclaration(simpleName))
-            return if (conflictingImport || shadowed) fqn else simpleName
-        }
-
-        val potionContentsRef = targetTypeReference("PotionContents", potionContentsFqn, expressionScope = true)
-        val dataComponentsRef = targetTypeReference("DataComponents", dataComponentsFqn, expressionScope = true)
-
+        val potionContentsRef =
+            exact.targetTypeReferenceOrNull(
+                "PotionContents",
+                potionContentsFqn,
+                expressionScope = true
+            ) ?: return source
+        val dataComponentsRef =
+            exact.targetTypeReferenceOrNull(
+                "DataComponents",
+                dataComponentsFqn,
+                expressionScope = true
+            ) ?: return source
         fun isExactItemStackType(typeText: String): Boolean =
-            exactTypeReference(typeText, "ItemStack", itemStackFqn)
+            exact.exactTypeReference(typeText, "ItemStack", itemStackFqn)
 
-        fun localVariableType(name: NameExpr): String? {
-            val callable = name.findAncestor(CallableDeclaration::class.java).orElse(null)
-            callable?.parameters
-                ?.singleOrNull { it.nameAsString == name.nameAsString }
-                ?.let { return it.typeAsString }
-
-            val lambda = name.findAncestor(LambdaExpr::class.java).orElse(null)
-            lambda?.parameters
-                ?.singleOrNull { it.nameAsString == name.nameAsString && !it.type.isUnknownType }
-                ?.let { return it.typeAsString }
-
-            val useStart = name.range.map { it.begin }.orElse(null) ?: return null
-            val candidates = cu.findAll(VariableDeclarator::class.java)
-                .filter { declaration ->
-                    declaration.nameAsString == name.nameAsString &&
-                        declaration.range.map { it.begin.isBefore(useStart) }.orElse(false) &&
-                        declaration.parentNode.orElse(null)
-                            ?.parentNode
-                            ?.map { it is com.github.javaparser.ast.stmt.ExpressionStmt }
-                            ?.orElse(false) == true
-                }
-                .filter { declaration ->
-                    val declarationBlock = declaration.findAncestor(
-                        com.github.javaparser.ast.stmt.BlockStmt::class.java
-                    ).orElse(null)
-                    declarationBlock != null && declarationBlock.isAncestorOf(name)
-                }
-                .sortedByDescending { declaration ->
-                    generateSequence(declaration.parentNode.orElse(null)) {
-                        it.parentNode.orElse(null)
-                    }.count()
-                }
-            candidates.firstOrNull()?.let { return it.typeAsString }
-
-            val owner = name.findAncestor(TypeDeclaration::class.java).orElse(null)
-            val fields = owner?.fields
-                ?.flatMap { it.variables }
-                ?.filter { it.nameAsString == name.nameAsString }
-                .orEmpty()
-            return fields.singleOrNull()?.typeAsString
-        }
-
-        fun fieldAccessType(field: FieldAccessExpr): String? {
-            val thisScope = field.scope as? ThisExpr ?: return null
-            val qualifiedOwner = thisScope.typeName.map { it.asString() }.orElse(null)
-            val owners = generateSequence(field.parentNode.orElse(null)) {
-                it.parentNode.orElse(null)
-            }.filterIsInstance<TypeDeclaration<*>>().toList()
-            val owner = if (qualifiedOwner == null) {
-                owners.firstOrNull()
-            } else {
-                owners.filter { it.nameAsString == qualifiedOwner }.singleOrNull()
-            } ?: return null
-            return owner.fields
-                .flatMap { it.variables }
-                .filter { it.nameAsString == field.nameAsString }
-                .singleOrNull()
-                ?.typeAsString
-        }
-
-        fun isProvablyItemStack(expression: Expression): Boolean = when (expression) {
-            is EnclosedExpr -> isProvablyItemStack(expression.inner)
-            is CastExpr -> isExactItemStackType(expression.typeAsString)
-            is ObjectCreationExpr -> isExactItemStackType(expression.typeAsString)
-            is NameExpr -> localVariableType(expression)?.let(::isExactItemStackType) == true
-            is FieldAccessExpr -> fieldAccessType(expression)?.let(::isExactItemStackType) == true
-            is ConditionalExpr ->
-                isProvablyItemStack(expression.thenExpr) && isProvablyItemStack(expression.elseExpr)
-            else -> false
-        }
+        fun isProvablyItemStack(expression: Expression): Boolean =
+            exact.isProvablyType(expression, "ItemStack", itemStackFqn)
 
         fun potionContents(expression: Expression): String =
             "($expression).getOrDefault($dataComponentsRef.POTION_CONTENTS, $potionContentsRef.EMPTY)"
@@ -65888,6 +65791,18 @@ public class ${builder.className} implements RecipeBuilder {
                 val candidate = base + suffix
                 if (usedNames.add(candidate)) return candidate
             }
+        }
+
+        fun legacyEffectList(contents: String): String {
+            val listName = generatedName("modPorterPotionEffects")
+            val contentsName = generatedName("modPorterPotionContents")
+            val holderName = generatedName("modPorterPotionHolder")
+            return "net.minecraft.Util.make(" +
+                "new java.util.ArrayList<net.minecraft.world.effect.MobEffectInstance>(), " +
+                "$listName -> { $potionContentsRef $contentsName = $contents; " +
+                "$contentsName.potion().ifPresent($holderName -> " +
+                "$listName.addAll($holderName.value().getEffects())); " +
+                "$listName.addAll($contentsName.customEffects()); })"
         }
 
         var changed = false
@@ -65922,6 +65837,15 @@ public class ${builder.className} implements RecipeBuilder {
                     val stack = call.arguments[0]
                     val potion = call.arguments[1]
                     val clearsPotion = isExactStaticConstant(potion, "Potions", potionsFqn, "EMPTY")
+                    val exactBuiltInPotion = (potion as? FieldAccessExpr)?.let { field ->
+                        field.nameAsString != "EMPTY" &&
+                            exact.exactStaticScope(field.scope, "Potions", potionsFqn)
+                    } == true
+                    val targetPotion = when {
+                        clearsPotion -> null
+                        exactBuiltInPotion -> potion.toString()
+                        else -> continue
+                    }
                     val createdStack = stack as? ObjectCreationExpr
                     val exactOneItemStack = createdStack != null &&
                         createdStack.arguments.size == 1 &&
@@ -65947,7 +65871,7 @@ public class ${builder.className} implements RecipeBuilder {
                             "$contentsName.customEffects()))"
                     } else {
                         "update($dataComponentsRef.POTION_CONTENTS, $potionContentsRef.EMPTY, " +
-                            "$potion, $potionContentsRef::withPotion)"
+                            "$targetPotion, $potionContentsRef::withPotion)"
                     }
                     if (call.parentNode.orElse(null) is com.github.javaparser.ast.stmt.ExpressionStmt) {
                         replace(call, parseExpression("($stack).$update"))
@@ -66001,9 +65925,9 @@ public class ${builder.className} implements RecipeBuilder {
                                 val method =
                                     if (comparison.operator == BinaryExpr.Operator.EQUALS) "isEmpty" else "isPresent"
                                 parseExpression("$contents.potion().$method()")
-                            }
-                            other is FieldAccessExpr &&
-                                exactStaticScope(other.scope, "Potions", potionsFqn) -> {
+                        }
+                        other is FieldAccessExpr &&
+                            exact.exactStaticScope(other.scope, "Potions", potionsFqn) -> {
                                 val holderName = generatedName("modPorterPotionHolder")
                                 val membership =
                                     "$contents.potion().map($holderName -> " +
@@ -66020,20 +65944,17 @@ public class ${builder.className} implements RecipeBuilder {
 
                     val variable = call.parentNode.orElse(null) as? VariableDeclarator ?: continue
                     if (variable.initializer.orElse(null) !== call ||
-                        !exactTypeReference(variable.typeAsString, "Potion", potionContentsFqn.removeSuffix("Contents"))
+                        !exact.exactTypeReference(
+                            variable.typeAsString,
+                            "Potion",
+                            potionFqn
+                        )
                     ) {
                         continue
                     }
                     val declaration = variable.parentNode.orElse(null) as? VariableDeclarationExpr ?: continue
                     if (declaration.variables.size != 1) continue
-                    val callable = variable.findAncestor(CallableDeclaration::class.java).orElse(null) ?: continue
-                    val declarationStart = variable.range.map { it.begin }.orElse(null) ?: continue
-                    val uses = callable.findAll(NameExpr::class.java)
-                        .filter { it.nameAsString == variable.nameAsString }
-                        .filter {
-                            it.findAncestor(CallableDeclaration::class.java).orElse(null) === callable &&
-                                it.range.map { range -> declarationStart.isBefore(range.begin) }.orElse(false)
-                        }
+                    val uses = exact.referencesTo(variable)
                     val supportedComparisons = mutableListOf<Triple<BinaryExpr, FieldAccessExpr, Boolean>>()
                     var graphSupported = true
                     for (use in uses) {
@@ -66049,7 +65970,7 @@ public class ${builder.className} implements RecipeBuilder {
                             binary.right === use -> binary.left
                             else -> null
                         } as? FieldAccessExpr
-                        if (other == null || !exactStaticScope(other.scope, "Potions", potionsFqn)) {
+                        if (other == null || !exact.exactStaticScope(other.scope, "Potions", potionsFqn)) {
                             graphSupported = false
                             break
                         }
@@ -66101,24 +66022,18 @@ public class ${builder.className} implements RecipeBuilder {
 
                 "getMobEffects", "getAllEffects" -> {
                     if (call.arguments.size != 1 || !isProvablyItemStack(call.arguments.single())) continue
-                    val allEffects = "${potionContents(call.arguments.single())}.getAllEffects()"
+                    val allEffects = legacyEffectList(potionContents(call.arguments.single()))
                     val parentCall = call.parentNode.orElse(null) as? MethodCallExpr
                     if (parentCall != null &&
                         parentCall.nameAsString == "isEmpty" &&
                         parentCall.arguments.isEmpty() &&
                         parentCall.scope.map { it === call }.orElse(false)
                     ) {
-                        replace(parentCall, parseExpression("!$allEffects.iterator().hasNext()"))
+                        replace(parentCall, parseExpression("$allEffects.isEmpty()"))
                     } else if (call.parentNode.orElse(null) is com.github.javaparser.ast.stmt.ForEachStmt) {
                         replace(call, parseExpression(allEffects))
                     } else {
-                        replace(
-                            call,
-                            parseExpression(
-                                "java.util.stream.StreamSupport.stream($allEffects.spliterator(), false)" +
-                                    ".collect(java.util.stream.Collectors.toCollection(java.util.ArrayList::new))"
-                            )
-                        )
+                        replace(call, parseExpression(allEffects))
                     }
                 }
 
@@ -66152,6 +66067,108 @@ public class ${builder.className} implements RecipeBuilder {
         }
         if (!maskJavaCommentsAndLiterals(result).contains("PotionUtils.")) {
             result = removeImport(result, potionUtilsFqn)
+        }
+        return result
+    }
+
+    private fun migrateRemovedEmptyPotionRegistryGuards(source: String): String {
+        val executable = maskJavaCommentsAndLiterals(source)
+        if (!executable.contains("Potions.EMPTY") ||
+            !executable.contains("BuiltInRegistries.POTION")
+        ) {
+            return source
+        }
+
+        val parser = JavaParser(
+            ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+        )
+        val parsed = parser.parse(source)
+        val cu = parsed.result.orElseThrow {
+            IllegalStateException(
+                "Cannot parse source containing removed empty potion registry guard: ${parseProblems(parsed)}"
+            )
+        }
+        LexicalPreservingPrinter.setup(cu)
+
+        val exact = ExactJavaSemantics(cu)
+        val potionFqn = "net.minecraft.world.item.alchemy.Potion"
+        val potionsFqn = "net.minecraft.world.item.alchemy.Potions"
+        val builtInRegistriesFqn = "net.minecraft.core.registries.BuiltInRegistries"
+
+        fun iteratesBuiltInPotionRegistry(expression: Expression): Boolean {
+            var streamExpression = expression
+            val toList = streamExpression as? MethodCallExpr
+            if (toList != null &&
+                toList.nameAsString == "toList" &&
+                toList.arguments.isEmpty()
+            ) {
+                streamExpression = toList.scope.orElse(null) ?: return false
+            }
+            val stream = streamExpression as? MethodCallExpr ?: return false
+            if (stream.nameAsString != "stream" || stream.arguments.isNotEmpty()) return false
+            val registry = stream.scope.orElse(null) as? FieldAccessExpr ?: return false
+            return registry.nameAsString == "POTION" &&
+                exact.exactStaticScope(
+                    registry.scope,
+                    "BuiltInRegistries",
+                    builtInRegistriesFqn
+                )
+        }
+
+        fun isEmptyPotionComparison(
+            condition: Expression,
+            variable: VariableDeclarator
+        ): Boolean {
+            val binary = condition as? BinaryExpr ?: return false
+            if (binary.operator != BinaryExpr.Operator.EQUALS) return false
+            val use = when {
+                binary.left is NameExpr &&
+                    binary.left.asNameExpr().nameAsString == variable.nameAsString ->
+                    binary.left.asNameExpr()
+                binary.right is NameExpr &&
+                    binary.right.asNameExpr().nameAsString == variable.nameAsString ->
+                    binary.right.asNameExpr()
+                else -> return false
+            }
+            if (exact.referencesTo(variable).none { it === use }) return false
+            val other = if (binary.left === use) binary.right else binary.left
+            val constant = other as? FieldAccessExpr ?: return false
+            return constant.nameAsString == "EMPTY" &&
+                exact.exactStaticScope(constant.scope, "Potions", potionsFqn)
+        }
+
+        fun isUnlabelledContinue(statement: com.github.javaparser.ast.stmt.Statement): Boolean =
+            statement is com.github.javaparser.ast.stmt.ContinueStmt && statement.label.isEmpty
+
+        fun isOnlyContinue(statement: com.github.javaparser.ast.stmt.Statement): Boolean =
+            isUnlabelledContinue(statement) ||
+                statement is com.github.javaparser.ast.stmt.BlockStmt &&
+                statement.statements.size == 1 &&
+                isUnlabelledContinue(statement.statements.single())
+
+        var changed = false
+        cu.findAll(com.github.javaparser.ast.stmt.ForEachStmt::class.java).forEach { loop ->
+            if (loop.variable.variables.size != 1) return@forEach
+            val variable = loop.variable.variables.single()
+            if (!exact.exactTypeReference(variable.typeAsString, "Potion", potionFqn) ||
+                !iteratesBuiltInPotionRegistry(loop.iterable)
+            ) {
+                return@forEach
+            }
+            val body = loop.body as? com.github.javaparser.ast.stmt.BlockStmt ?: return@forEach
+            val guard = body.statements.filterIsInstance<IfStmt>().singleOrNull {
+                it.elseStmt.isEmpty &&
+                    isOnlyContinue(it.thenStmt) &&
+                    isEmptyPotionComparison(it.condition, variable)
+            } ?: return@forEach
+            guard.remove()
+            changed = true
+        }
+
+        if (!changed) return source
+        var result = LexicalPreservingPrinter.print(cu)
+        if (!maskJavaCommentsAndLiterals(result).contains("Potions.")) {
+            result = removeImport(result, potionsFqn)
         }
         return result
     }

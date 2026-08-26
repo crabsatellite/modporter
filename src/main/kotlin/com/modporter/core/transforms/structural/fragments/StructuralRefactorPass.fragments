@@ -22,3 +22,4 @@
 022-migrate-project-map-entry-value-get-calls.ktfrag
 023-migrate-use-item-on-interaction-result-returns.ktfrag
 024-migrate-legacy-potion-utils-calls.ktfrag
+025-remove-empty-potion-registry-guards.ktfrag

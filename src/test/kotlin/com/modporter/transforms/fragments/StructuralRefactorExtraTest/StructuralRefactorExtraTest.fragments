@@ -17,6 +17,7 @@
 017-migrates-deferred-holder-registry-base-generics-for-entity-types-and-mul.ktfrag
 018-common-vanilla-121-rewrites-ignore-comments-and-strings.ktfrag
 019-migrates-additional-neo-forge-121-block-entity-and-client-api-surfaces.ktfrag
+019b-migrates-removed-entity-riding-offset-center-expression.ktfrag
 020-migrates-entity-riding-offset-call-sites-only-with-explicit-vehicle-cont.ktfrag
 021-migrates-furnace-quick-check-accessors-to-recipe-holder-single-stack-bou.ktfrag
 022-migrates-placement-ban-recipes-to-idless-codec-backed-structure.ktfrag
@@ -42,3 +43,4 @@
 042-third-party-record-components-and-event-bus-contracts-are-exact.ktfrag
 043-deferred-holder-generics-use-lexical-and-registry-contracts.ktfrag
 044-potion-utils-migration-uses-exact-ast-contracts.ktfrag
+045-empty-potion-registry-guards-require-exact-built-in-iteration.ktfrag
